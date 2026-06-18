@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +15,17 @@ def get_connection():
 def init_db():
     conn = get_connection()
     cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        full_name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS companies (
@@ -59,10 +70,12 @@ def init_db():
         volume TEXT,
         mode TEXT,
         status TEXT DEFAULT 'new',
+        owner INTEGER,
         inquiry_text TEXT,
         inquiry_date TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(owner) REFERENCES users(id),
         FOREIGN KEY(contact_id) REFERENCES contacts(id)
     )
     """)
@@ -111,20 +124,36 @@ def init_db():
         due_date TEXT,
         status TEXT DEFAULT 'open',
         priority TEXT DEFAULT 'normal',
+        assigned_to INTEGER,
+        created_by INTEGER,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        completed_at TEXT
+        completed_at TEXT,
+        FOREIGN KEY(assigned_to) REFERENCES users(id),
+        FOREIGN KEY(created_by) REFERENCES users(id)
     )
     """)
 
-    try:
-        cur.execute("ALTER TABLE tasks ADD COLUMN channel TEXT")
-    except sqlite3.OperationalError:
-        pass
+    def add_column(table, column_definition):
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column_definition}")
+        except sqlite3.OperationalError:
+            pass
 
-    try:
-        cur.execute("ALTER TABLE tasks ADD COLUMN campaign_name TEXT")
-    except sqlite3.OperationalError:
-        pass
+    add_column("tasks", "channel TEXT")
+    add_column("tasks", "campaign_name TEXT")
+    add_column("tasks", "assigned_to INTEGER")
+    add_column("tasks", "created_by INTEGER")
+    add_column("opportunities", "owner INTEGER")
+
+    user_count = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if user_count == 0:
+        cur.execute(
+            """
+            INSERT INTO users (username, full_name, role, is_active)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("admin", "Kien Ho", "admin", 1),
+        )
 
     conn.commit()
     conn.close()
@@ -136,13 +165,22 @@ def create_inquiry(inquiry_text):
 
     conn = get_connection()
     cur = conn.cursor()
+    admin_user = cur.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE username = ?
+        """,
+        ("admin",),
+    ).fetchone()
+    admin_user_id = admin_user["id"] if admin_user else None
 
     cur.execute(
         """
-        INSERT INTO opportunities (title, inquiry_text, status, inquiry_date)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO opportunities (title, owner, inquiry_text, status, inquiry_date)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (clean_text[:80], clean_text, "new", today),
+        (clean_text[:80], admin_user_id, clean_text, "new", today),
     )
 
     opportunity_id = cur.lastrowid
@@ -155,9 +193,11 @@ def create_inquiry(inquiry_text):
             title,
             due_date,
             status,
-            priority
+            priority,
+            assigned_to,
+            created_by
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             opportunity_id,
@@ -166,6 +206,8 @@ def create_inquiry(inquiry_text):
             today,
             "open",
             "high",
+            admin_user_id,
+            admin_user_id,
         ),
     )
 
@@ -225,3 +267,17 @@ def get_task_counts_by_type():
         row["task_type"]: row["task_count"]
         for row in rows
     }
+
+
+def get_user_count():
+    conn = get_connection()
+
+    user_count = conn.execute(
+        """
+        SELECT COUNT(*) AS user_count
+        FROM users
+        """
+    ).fetchone()["user_count"]
+
+    conn.close()
+    return user_count

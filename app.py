@@ -1,9 +1,10 @@
-﻿import streamlit as st
+import streamlit as st
 
 from database import (
     create_inquiry,
     get_open_tasks,
     get_task_counts_by_type,
+    get_user_count,
     init_db,
 )
 
@@ -18,8 +19,9 @@ st.title("🚀 1Aim Growth Engine")
 
 task_counts = get_task_counts_by_type()
 open_tasks = get_open_tasks()
+user_count = get_user_count()
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric(
@@ -43,6 +45,12 @@ with col4:
     st.metric(
         "Prepare Quote",
         task_counts.get("prepare_quote", 0)
+    )
+
+with col5:
+    st.metric(
+        "Users",
+        user_count
     )
 
 st.divider()
