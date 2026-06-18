@@ -4,7 +4,6 @@ from database import (
     create_inquiry,
     get_open_tasks,
     get_task_counts_by_type,
-    get_user_count,
     init_db,
 )
 
@@ -19,7 +18,6 @@ st.title("🚀 1Aim Growth Engine")
 
 task_counts = get_task_counts_by_type()
 open_tasks = get_open_tasks()
-user_count = get_user_count()
 
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -49,15 +47,15 @@ with col4:
 
 with col5:
     st.metric(
-        "Users",
-        user_count
+        "Chase Vendor",
+        task_counts.get("chase_vendor", 0)
     )
 
 st.divider()
 
 st.subheader("Today Cockpit")
 
-cockpit_col1, cockpit_col2, cockpit_col3 = st.columns(3)
+cockpit_col1, cockpit_col2, cockpit_col3, cockpit_col4, cockpit_col5 = st.columns(5)
 
 
 def show_tasks(task_type):
@@ -88,6 +86,14 @@ with cockpit_col2:
 with cockpit_col3:
     st.markdown("**New Lead Outreach**")
     show_tasks("new_lead_outreach")
+
+with cockpit_col4:
+    st.markdown("**Prepare Quote**")
+    show_tasks("prepare_quote")
+
+with cockpit_col5:
+    st.markdown("**Chase Vendor**")
+    show_tasks("chase_vendor")
 
 st.divider()
 
