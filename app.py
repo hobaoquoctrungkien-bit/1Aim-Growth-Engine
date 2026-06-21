@@ -16,20 +16,38 @@ from database import (
     create_inquiry,
     find_captured_crm_duplicates,
     get_app_setting,
+    get_database_backup_status,
     get_existing_lead_keys,
     get_lead_detail,
     get_leads,
+    get_crm_dashboard_data,
+    get_crm_follow_up_rows,
+    get_daily_outreach_capacity,
+    get_holiday_library,
     get_open_tasks,
     get_task_counts_by_type,
     import_leads,
+    initialize_missing_lead_followups,
     init_db,
     mark_prepare_quote_sent,
     save_captured_crm_record,
+    save_holiday_library_item,
     has_captured_crm_duplicates,
     set_app_setting,
+    complete_follow_up,
+    add_country_holiday_reminders,
+    create_relationship_occasion,
+    snooze_follow_up,
+    get_occasion_reminders,
+    mark_occasion_message_sent,
+    snooze_occasion,
+    sync_date_based_occasions,
+    refresh_lead_priority_scores,
+    update_relationship_occasion,
     update_contact_relationship_action,
     update_lead_detail,
     update_lead_next_follow_up,
+    update_lead_notes,
     update_lead_status_action,
     update_organization_customer_action,
 )
@@ -76,6 +94,17 @@ CAPTURE_SAVE_AS_OPTIONS = [
 DUPLICATE_ACTION_OPTIONS = [
     "Update existing",
     "Create new anyway",
+]
+PREFERRED_LANGUAGE_OPTIONS = ["English", "Vietnamese", "Chinese"]
+PREFERRED_CHANNEL_OPTIONS = ["Email", "Phone", "WhatsApp", "WeChat"]
+RELATIONSHIP_TONE_OPTIONS = ["Formal", "Warm", "Friendly", "Short"]
+OCCASION_TYPE_OPTIONS = [
+    "National Holiday",
+    "Birthday",
+    "Company Anniversary",
+    "Cooperation Anniversary",
+    "First Meeting Anniversary",
+    "Custom",
 ]
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -203,6 +232,18 @@ def apply_global_typography(ui_scale):
         .stButton > button[kind="primary"] {
             background: #2f80ed;
             border-color: #2f80ed;
+        }
+        .st-key-capture_organization_type div[data-baseweb="select"] > div,
+        .st-key-capture_customer_status div[data-baseweb="select"] > div,
+        .st-key-capture_relationship_status div[data-baseweb="select"] > div {
+            border: 2px solid #ff5a5f !important;
+            box-shadow: 0 0 0 1px rgba(255, 90, 95, 0.35) !important;
+        }
+        .st-key-capture_organization_type label,
+        .st-key-capture_customer_status label,
+        .st-key-capture_relationship_status label {
+            color: #ffb3b5 !important;
+            font-weight: 700 !important;
         }
     </style>
     """
@@ -796,116 +837,532 @@ def read_uploaded_leads_file(uploaded_file, extension, sheet_name, header_row_in
 
 
 def show_dashboard():
-    st.title("1Aim Growth Engine")
+    st.title("CRM Sales Cockpit")
+    data = get_crm_dashboard_data()
+    kpis = data["kpis"]
+    outreach_queue = data["outreach_queue"]
 
-    task_counts = get_task_counts_by_type()
-    open_tasks = get_open_tasks()
+    def priority_color(score):
+        if score >= 90:
+            return "#ff5a5f"
+        if score >= 70:
+            return "#ff9f43"
+        if score >= 50:
+            return "#f6d365"
+        return "#94a3b8"
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    def priority_badge(score):
+        color = priority_color(int(score or 0))
+        st.markdown(
+            f"""
+            <div style="border:1px solid {color};color:{color};border-radius:6px;padding:6px 8px;text-align:center;font-weight:700;">
+                {int(score or 0)}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    kpi_cols = st.columns(6)
+    labels = [
+        ("Follow-ups Due Today", "due_today"),
+        ("Overdue Follow-ups", "overdue"),
+        ("New Leads", "new_leads"),
+        ("Warm Relationships", "warm_relationships"),
+        ("Qualified Leads", "qualified_leads"),
+        ("Customers", "customers"),
+    ]
+    for col, (label, key) in zip(kpi_cols, labels):
+        col.metric(label, int(kpis.get(key) or 0))
+
+    priority_cols = st.columns(6)
+    priority_cols[0].metric("Today's Outreach Queue", outreach_queue["today"])
+    priority_cols[1].metric("This Week", outreach_queue["this_week"])
+    priority_cols[2].metric("Next 30 Days", outreach_queue["next_30_days"])
+    priority_cols[3].metric("High Priority Contacts", int(kpis.get("high_priority_contacts") or 0))
+    priority_cols[4].metric("China Leads", int(kpis.get("china_leads") or 0))
+    priority_cols[5].metric("China Warm Relationships", int(kpis.get("china_warm_relationships") or 0))
+
+    if int(kpis.get("no_followup") or 0):
+        st.warning(f"{int(kpis.get('no_followup') or 0)} leads need activation scheduling.")
+        if st.button("Activate Missing Follow-ups", key="dashboard_activate_followups"):
+            result = initialize_missing_lead_followups()
+            st.success(
+                f"Activated {result['updated']} leads"
+                + (f" from {result['start_date']} to {result['end_date']}." if result["updated"] else ".")
+            )
+            st.rerun()
+
+    def open_lead_button(row, key_prefix):
+        if st.button("Open", key=f"{key_prefix}_{row['lead_id']}"):
+            st.session_state.selected_lead_id = row["lead_id"]
+            st.session_state.pending_page = "Leads List"
+            st.rerun()
+
+    def show_mini_rows(rows, key_prefix):
+        if not rows:
+            st.info("No records.")
+            return
+        for row in rows:
+            cols = st.columns([2, 2, 1, 1, 1])
+            cols[0].write(row["contact_name"] or "No contact")
+            cols[1].write(row["organization_name"] or "No organization")
+            cols[2].write(row["lead_status"])
+            cols[3].write(row["next_action_date"] or row["due_bucket"])
+            with cols[4]:
+                open_lead_button(row, key_prefix)
+
+    st.subheader("Today's Action List")
+    if not data["today_action_list"]:
+        st.info("No outreach actions due today.")
+    else:
+        header_cols = st.columns([1, 2, 2, 1, 2, 1, 1, 1])
+        header_cols[0].caption("Priority")
+        header_cols[1].caption("Contact")
+        header_cols[2].caption("Organization")
+        header_cols[3].caption("Country")
+        header_cols[4].caption("Next Action")
+        header_cols[5].caption("Open")
+        header_cols[6].caption("Done")
+        header_cols[7].caption("Snooze")
+    for row in data["today_action_list"]:
+        cols = st.columns([1, 2, 2, 1, 2, 1, 1, 1])
+        with cols[0]:
+            priority_badge(row["priority_score"])
+        cols[1].write(row["contact_name"] or "No contact")
+        cols[2].write(row["organization_name"] or "No organization")
+        cols[3].write(row["country"] or "-")
+        cols[4].write(row["recommended_action"] or row["next_action"] or "Follow up")
+        if cols[5].button("Open", key=f"dash_action_open_{row['lead_id']}"):
+            st.session_state.selected_lead_id = row["lead_id"]
+            st.session_state.pending_page = "Leads List"
+            st.rerun()
+        if cols[6].button("Done", key=f"dash_action_done_{row['lead_id']}"):
+            complete_follow_up(row["lead_id"])
+            st.rerun()
+        if cols[7].button("Snooze", key=f"dash_action_snooze_{row['lead_id']}"):
+            snooze_follow_up(row["lead_id"], 7)
+            st.rerun()
+
+    st.subheader("China Priority Leads")
+    if not data["china_priority_leads"]:
+        st.info("No China priority leads in the active queue.")
+    else:
+        header_cols = st.columns([2, 2, 1, 1, 1, 1])
+        header_cols[0].caption("Contact")
+        header_cols[1].caption("Company")
+        header_cols[2].caption("City")
+        header_cols[3].caption("Membership")
+        header_cols[4].caption("Status")
+        header_cols[5].caption("Score")
+    for row in data["china_priority_leads"]:
+        cols = st.columns([2, 2, 1, 1, 1, 1])
+        cols[0].write(row["contact_name"] or "No contact")
+        cols[1].write(row["organization_name"] or "No organization")
+        cols[2].write(row["city"] or "-")
+        cols[3].write(row["membership"] or "-")
+        cols[4].write(row["relationship_status"] or row["lead_status"] or "-")
+        with cols[5]:
+            priority_badge(row["priority_score"])
+
+    st.subheader("Overdue Follow-ups")
+    show_mini_rows(data["overdue_followups"], "dash_overdue")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Warm Relationships")
+        show_mini_rows(data["warm_relationships"], "dash_warm")
+    with col_b:
+        st.subheader("New Leads Needing First Touch")
+        show_mini_rows(data["new_leads_first_touch"], "dash_new")
+
+    st.subheader("Campaign Progress")
+    st.dataframe(pd.DataFrame(data["campaign_progress"]), use_container_width=True, hide_index=True)
+
+    st.subheader("Country Pipeline")
+    st.dataframe(pd.DataFrame(data["country_pipeline"]), use_container_width=True, hide_index=True)
+
+
+def format_bytes(size_bytes):
+    size = float(size_bytes or 0)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def show_admin():
+    st.title("Admin")
+
+    status = get_database_backup_status()
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("Quote Follow-up", task_counts.get("quote_follow_up", 0))
-
+        st.metric("Current DB Size", format_bytes(status["db_size_bytes"]))
     with col2:
-        st.metric("Lead Nurturing", task_counts.get("relationship_touch", 0))
-
+        st.metric("Backups", status["backup_count"])
     with col3:
-        st.metric("New Lead Outreach", task_counts.get("new_lead_outreach", 0))
+        st.metric("Latest Backup Time", status["latest_backup_time"] or "No backups")
 
-    with col4:
-        st.metric("Prepare Quote", task_counts.get("prepare_quote", 0))
-
-    with col5:
-        st.metric("Chase Vendor", task_counts.get("chase_vendor", 0))
+    if status["latest_backup_name"]:
+        st.caption(f"Latest backup: {status['latest_backup_name']}")
 
     st.divider()
-    st.subheader("Today Cockpit")
-
-    cockpit_col1, cockpit_col2, cockpit_col3, cockpit_col4, cockpit_col5 = st.columns(5)
-
-    def show_tasks(task_type):
-        tasks = [
-            task for task in open_tasks
-            if task["task_type"] == task_type
-        ]
-
-        if not tasks:
-            st.info("No open tasks.")
-            return
-
-        for task in tasks:
-            st.write(task["title"])
-
-            if task["due_date"]:
-                st.caption(f"Due: {task['due_date']}")
-
-    def show_prepare_quote_actions():
-        tasks = [
-            task for task in open_tasks
-            if task["task_type"] == "prepare_quote"
-        ]
-
-        if not tasks:
-            st.info("No open tasks.")
-            return
-
-        for task in tasks:
-            st.write(task["title"])
-
-            if task["due_date"]:
-                st.caption(f"Due: {task['due_date']}")
-
-            follow_up_date = st.date_input(
-                "Follow-up date",
-                key=f"quote_follow_up_date_{task['id']}",
-            )
-
-            if st.button("Mark Quote Sent", key=f"quote_sent_{task['id']}"):
-                if mark_prepare_quote_sent(task["id"], follow_up_date.isoformat()):
-                    st.success("Quote sent. Follow-up task created.")
-                    st.rerun()
-                else:
-                    st.warning("This task is no longer available.")
-
-    with cockpit_col1:
-        st.markdown("**Quote Follow-up**")
-        show_tasks("quote_follow_up")
-
-    with cockpit_col2:
-        st.markdown("**Lead Nurturing**")
-        show_tasks("relationship_touch")
-
-    with cockpit_col3:
-        st.markdown("**New Lead Outreach**")
-        show_tasks("new_lead_outreach")
-
-    with cockpit_col4:
-        st.markdown("**Prepare Quote**")
-        show_tasks("prepare_quote")
-
-    with cockpit_col5:
-        st.markdown("**Chase Vendor**")
-        show_tasks("chase_vendor")
+    st.subheader("System Settings")
+    capacity_options = [10, 20, 30, 50]
+    current_capacity = get_daily_outreach_capacity()
+    selected_capacity = st.selectbox(
+        "Daily Outreach Capacity",
+        capacity_options,
+        index=capacity_options.index(current_capacity) if current_capacity in capacity_options else 0,
+    )
+    if st.button("Save Capacity", key="save_daily_outreach_capacity"):
+        set_app_setting("daily_outreach_capacity", str(selected_capacity))
+        st.success("Daily outreach capacity saved.")
+        st.rerun()
 
     st.divider()
+    st.subheader("CRM Activation")
+    st.caption("Initialize missing next actions and spread them across the next 30 days.")
+    if st.button("Activate Missing Lead Follow-ups", key="admin_activate_followups"):
+        result = initialize_missing_lead_followups()
+        st.success(
+            f"Activated {result['updated']} leads"
+            + (f" from {result['start_date']} to {result['end_date']}." if result["updated"] else ".")
+        )
+        st.rerun()
+    if st.button("Recalculate Priority Scores", key="admin_refresh_priority_scores"):
+        updated = refresh_lead_priority_scores()
+        st.success(f"Priority scores recalculated. Updated {updated} leads.")
+        st.rerun()
 
-    st.subheader("Today's Actions")
-    show_prepare_quote_actions()
 
-    st.subheader("New Inquiry")
+def show_follow_up_queue():
+    st.title("Follow-up Queue")
+    rows = get_crm_follow_up_rows()
 
-    inquiry_text = st.text_area(
-        "Paste inquiry here",
-        height=200,
+    if not rows:
+        st.info("No follow-ups due right now.")
+        return
+
+    def option_values(key):
+        values = sorted({row.get(key) or "" for row in rows if row.get(key)})
+        return ["All"] + values
+
+    filter_cols = st.columns(4)
+    status_filter = filter_cols[0].selectbox(
+        "Status",
+        ["All"] + sorted({row["lead_status"] for row in rows} | {row["relationship_status"] for row in rows} | {row["customer_status"] for row in rows}),
+    )
+    country_filter = filter_cols[1].selectbox("Country", option_values("country"))
+    city_filter = filter_cols[2].selectbox("City", option_values("city"))
+    org_type_filter = filter_cols[3].selectbox("Organization Type", option_values("organization_type"))
+
+    filter_cols2 = st.columns(4)
+    campaign_filter = filter_cols2[0].selectbox("Campaign", option_values("campaign"))
+    membership_filter = filter_cols2[1].selectbox("Membership", option_values("membership"))
+    owner_filter = filter_cols2[2].selectbox("Owner", option_values("owner"))
+    due_filter = filter_cols2[3].selectbox(
+        "Due",
+        ["All", "Overdue", "Today", "This Week", "No Follow-up Date"],
     )
 
-    if st.button("Save Inquiry"):
-        if inquiry_text.strip():
-            create_inquiry(inquiry_text)
-            st.success("Inquiry saved successfully.")
-            st.rerun()
-        else:
-            st.warning("Paste an inquiry before saving.")
+    def matches(row):
+        if status_filter != "All" and status_filter not in [
+            row["lead_status"],
+            row["relationship_status"],
+            row["customer_status"],
+        ]:
+            return False
+        for selected, key in [
+            (country_filter, "country"),
+            (city_filter, "city"),
+            (org_type_filter, "organization_type"),
+            (campaign_filter, "campaign"),
+            (membership_filter, "membership"),
+            (owner_filter, "owner"),
+        ]:
+            if selected != "All" and row.get(key) != selected:
+                return False
+        if due_filter != "All" and row["due_bucket"] != due_filter:
+            return False
+        return True
+
+    filtered_rows = [row for row in rows if matches(row)]
+    st.caption(f"{len(filtered_rows)} follow-ups")
+
+    def render_contact_buttons(row):
+        comm_cols = st.columns(4)
+        with comm_cols[0]:
+            if row["email"]:
+                st.link_button("Email", f"mailto:{row['email']}")
+            else:
+                st.button("Email", disabled=True, key=f"queue_email_disabled_{row['lead_id']}")
+        with comm_cols[1]:
+            if row["phone"]:
+                st.link_button("Call", f"tel:{row['phone']}")
+            else:
+                st.button("Call", disabled=True, key=f"queue_call_disabled_{row['lead_id']}")
+        with comm_cols[2]:
+            whatsapp_number = re.sub(r"[^0-9]", "", row["whatsapp"] or "")
+            if whatsapp_number:
+                st.link_button("WhatsApp", f"https://wa.me/{whatsapp_number}")
+            else:
+                st.button("WhatsApp", disabled=True, key=f"queue_wa_disabled_{row['lead_id']}")
+        with comm_cols[3]:
+            if row["wechat"]:
+                components.html(
+                    f"""
+                    <button
+                        style="background:#1c2636;color:#edf2f7;border:1px solid #3d4b63;border-radius:6px;padding:8px 12px;cursor:pointer;width:100%;"
+                        onclick="navigator.clipboard.writeText({row['wechat']!r})"
+                    >
+                        Copy WeChat
+                    </button>
+                    """,
+                    height=42,
+                )
+            else:
+                st.button("WeChat", disabled=True, key=f"queue_wechat_disabled_{row['lead_id']}")
+
+    for row in filtered_rows:
+        with st.container():
+            top_cols = st.columns([2, 2, 1, 1])
+            top_cols[0].markdown(f"**{row['contact_name'] or 'No contact'}**")
+            top_cols[0].caption(row["job_title"])
+            top_cols[1].markdown(f"**{row['organization_name'] or 'No organization'}**")
+            top_cols[1].caption(" / ".join(item for item in [row["country"], row["city"]] if item))
+            top_cols[2].write(row["due_bucket"])
+            top_cols[3].write(row["next_action_date"] or "No date")
+
+            status_cols = st.columns(7)
+            status_cols[0].write(f"Lead: {row['lead_status']}")
+            status_cols[1].write(f"Relationship: {row['relationship_status'] or '-'}")
+            status_cols[2].write(f"Customer: {row['customer_status'] or '-'}")
+            status_cols[3].write(f"Last: {row['last_contacted_at'] or '-'}")
+            status_cols[4].write(f"Priority: {row['priority_score']}")
+            status_cols[5].write(row["recommended_action"] or row["next_action"] or "No next action")
+            status_cols[6].write(f"{row['source']} / {row['campaign']}")
+
+            render_contact_buttons(row)
+
+            action_cols = st.columns(10)
+            action_map = [
+                ("Contacted", lambda row=row: update_lead_status_action(row["lead_id"], "Contacted")),
+                ("Introduced", lambda row=row: update_contact_relationship_action(row["contact_id"], "Introduced") if row["contact_id"] else False),
+                ("Replied", lambda row=row: update_lead_status_action(row["lead_id"], "Replied")),
+                ("Warm", lambda row=row: update_contact_relationship_action(row["contact_id"], "Warm") if row["contact_id"] else False),
+                ("Active", lambda row=row: update_contact_relationship_action(row["contact_id"], "Active") if row["contact_id"] else False),
+                ("+3d", lambda row=row: snooze_follow_up(row["lead_id"], 3)),
+                ("+7d", lambda row=row: snooze_follow_up(row["lead_id"], 7)),
+                ("+30d", lambda row=row: snooze_follow_up(row["lead_id"], 30)),
+            ]
+            for col, (label, action) in zip(action_cols, action_map):
+                if col.button(label, key=f"queue_{label}_{row['lead_id']}"):
+                    action()
+                    st.rerun()
+
+            if action_cols[8].button("Open", key=f"queue_open_{row['lead_id']}"):
+                st.session_state.selected_lead_id = row["lead_id"]
+                st.session_state.pending_page = "Leads List"
+                st.rerun()
+
+            with action_cols[9]:
+                with st.popover("Set Next"):
+                    next_action = st.text_input("Next Action", value=row["next_action"], key=f"queue_next_action_{row['lead_id']}")
+                    next_date = st.text_input("Next Date", value=row["next_action_date"], key=f"queue_next_date_{row['lead_id']}")
+                    if st.button("Save", key=f"queue_save_next_{row['lead_id']}"):
+                        update_lead_next_follow_up(row["lead_id"], next_action, next_date)
+                        st.rerun()
+
+            st.divider()
+
+
+def show_occasion_reminders():
+    st.title("Occasion Reminders")
+
+    with st.expander("Holiday Library", expanded=False):
+        holidays = get_holiday_library()
+        if holidays:
+            st.dataframe(
+                pd.DataFrame(holidays)[
+                    [
+                        "country",
+                        "holiday_name",
+                        "holiday_date",
+                        "is_recurring",
+                        "recurrence_rule",
+                        "default_message_theme",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with st.popover("Add Holiday"):
+            country = st.text_input("Country", key="new_holiday_country")
+            holiday_name = st.text_input("Holiday Name", key="new_holiday_name")
+            holiday_date = st.text_input("Holiday Date", placeholder="YYYY-MM-DD", key="new_holiday_date")
+            is_recurring = st.checkbox("Recurring yearly", value=True, key="new_holiday_recurring")
+            recurrence_rule = st.text_input("Recurrence Rule", value="yearly_mm_dd", key="new_holiday_rule")
+            theme = st.text_input("Default Message Theme", key="new_holiday_theme")
+            if st.button("Save Holiday", key="new_holiday_save"):
+                save_holiday_library_item(
+                    {
+                        "country": country,
+                        "holiday_name": holiday_name,
+                        "holiday_date": holiday_date,
+                        "is_recurring": is_recurring,
+                        "recurrence_rule": recurrence_rule,
+                        "default_message_theme": theme,
+                    }
+                )
+                st.success("Holiday saved.")
+                st.rerun()
+
+        for holiday in holidays:
+            with st.popover(f"Edit {holiday['country']} - {holiday['holiday_name']}"):
+                country = st.text_input("Country", value=holiday["country"], key=f"holiday_country_{holiday['id']}")
+                holiday_name = st.text_input("Holiday Name", value=holiday["holiday_name"], key=f"holiday_name_{holiday['id']}")
+                holiday_date = st.text_input("Holiday Date", value=holiday["holiday_date"], key=f"holiday_date_{holiday['id']}")
+                is_recurring = st.checkbox("Recurring yearly", value=bool(holiday["is_recurring"]), key=f"holiday_recurring_{holiday['id']}")
+                recurrence_rule = st.text_input("Recurrence Rule", value=holiday["recurrence_rule"], key=f"holiday_rule_{holiday['id']}")
+                theme = st.text_input("Default Message Theme", value=holiday["default_message_theme"] or "", key=f"holiday_theme_{holiday['id']}")
+                if st.button("Update Holiday", key=f"holiday_update_{holiday['id']}"):
+                    save_holiday_library_item(
+                        {
+                            "country": country,
+                            "holiday_name": holiday_name,
+                            "holiday_date": holiday_date,
+                            "is_recurring": is_recurring,
+                            "recurrence_rule": recurrence_rule,
+                            "default_message_theme": theme,
+                        },
+                        holiday["id"],
+                    )
+                    st.success("Holiday updated.")
+                    st.rerun()
+
+    reminders = get_occasion_reminders()
+
+    if not reminders:
+        st.info("No occasion reminders due.")
+        return
+
+    bucket_filter = st.radio(
+        "When",
+        ["All", "Today", "Next 7 days", "Next 30 days", "Overdue"],
+        horizontal=True,
+    )
+
+    filtered = [
+        reminder for reminder in reminders
+        if bucket_filter == "All" or reminder["bucket"] == bucket_filter
+    ]
+
+    for reminder in filtered:
+        with st.container():
+            header_cols = st.columns([2, 2, 1, 1])
+            header_cols[0].markdown(f"**{reminder.get('contact_name') or 'No contact'}**")
+            header_cols[0].caption(reminder.get("organization_name") or "No organization")
+            header_cols[1].markdown(f"**{reminder['occasion_name']}**")
+            header_cols[1].caption(reminder.get("country") or "")
+            header_cols[2].write(reminder["display_date"])
+            header_cols[3].write(reminder["bucket"])
+
+            meta_cols = st.columns(3)
+            meta_cols[0].write(f"Channel: {reminder.get('preferred_channel') or '-'}")
+            meta_cols[1].write(f"Language: {reminder.get('preferred_language') or '-'}")
+            meta_cols[2].write(f"Tone: {reminder.get('message_tone') or '-'}")
+
+            message = st.text_area(
+                "Suggested Message",
+                value=reminder["suggested_message"],
+                height=120,
+                key=f"occasion_message_{reminder['id']}",
+            )
+
+            action_cols = st.columns(5)
+            with action_cols[0]:
+                components.html(
+                    f"""
+                    <button
+                        style="background:#1c2636;color:#edf2f7;border:1px solid #3d4b63;border-radius:6px;padding:8px 12px;cursor:pointer;width:100%;"
+                        onclick="navigator.clipboard.writeText({message!r})"
+                    >
+                        Copy Message
+                    </button>
+                    """,
+                    height=44,
+                )
+            if action_cols[1].button("Mark Sent", key=f"occasion_sent_{reminder['id']}"):
+                mark_occasion_message_sent(reminder["id"])
+                st.success("Occasion message logged as sent.")
+                st.rerun()
+            if action_cols[2].button("Snooze", key=f"occasion_snooze_{reminder['id']}"):
+                snooze_occasion(reminder["id"], 7)
+                st.rerun()
+            with action_cols[3]:
+                with st.popover("Edit Occasion"):
+                    occasion_type = st.selectbox(
+                        "Type",
+                        OCCASION_TYPE_OPTIONS,
+                        index=OCCASION_TYPE_OPTIONS.index(reminder["occasion_type"]) if reminder["occasion_type"] in OCCASION_TYPE_OPTIONS else 0,
+                        key=f"edit_occ_type_{reminder['id']}",
+                    )
+                    occasion_name = st.text_input("Occasion Name", value=reminder["occasion_name"], key=f"edit_occ_name_{reminder['id']}")
+                    occasion_date = st.text_input("Occasion Date", value=reminder["occasion_date"], key=f"edit_occ_date_{reminder['id']}")
+                    country = st.text_input("Country", value=reminder.get("country") or "", key=f"edit_occ_country_{reminder['id']}")
+                    channel = st.selectbox(
+                        "Channel",
+                        PREFERRED_CHANNEL_OPTIONS,
+                        index=PREFERRED_CHANNEL_OPTIONS.index(reminder["preferred_channel"]) if reminder.get("preferred_channel") in PREFERRED_CHANNEL_OPTIONS else 0,
+                        key=f"edit_occ_channel_{reminder['id']}",
+                    )
+                    language = st.selectbox(
+                        "Language",
+                        PREFERRED_LANGUAGE_OPTIONS,
+                        index=PREFERRED_LANGUAGE_OPTIONS.index(reminder["preferred_language"]) if reminder.get("preferred_language") in PREFERRED_LANGUAGE_OPTIONS else 0,
+                        key=f"edit_occ_lang_{reminder['id']}",
+                    )
+                    tone = st.selectbox(
+                        "Tone",
+                        RELATIONSHIP_TONE_OPTIONS,
+                        index=RELATIONSHIP_TONE_OPTIONS.index(reminder["message_tone"]) if reminder.get("message_tone") in RELATIONSHIP_TONE_OPTIONS else 1,
+                        key=f"edit_occ_tone_{reminder['id']}",
+                    )
+                    reminder_days = st.number_input(
+                        "Reminder Days Before",
+                        min_value=0,
+                        max_value=60,
+                        value=int(reminder.get("reminder_days_before") or 7),
+                        key=f"edit_occ_days_{reminder['id']}",
+                    )
+                    if st.button("Save Occasion", key=f"save_occ_{reminder['id']}"):
+                        update_relationship_occasion(
+                            reminder["id"],
+                            {
+                                "occasion_type": occasion_type,
+                                "occasion_name": occasion_name,
+                                "occasion_date": occasion_date,
+                                "country": country,
+                                "is_recurring": bool(reminder.get("is_recurring")),
+                                "recurrence_rule": reminder.get("recurrence_rule"),
+                                "preferred_channel": channel,
+                                "preferred_language": language,
+                                "message_tone": tone,
+                                "reminder_days_before": reminder_days,
+                                "status": reminder.get("status") or "Active",
+                                "notes": reminder.get("notes"),
+                            },
+                        )
+                        st.rerun()
+            if action_cols[4].button("Open Detail", key=f"occasion_open_{reminder['id']}", disabled=not reminder.get("lead_id")):
+                st.session_state.selected_lead_id = reminder["lead_id"]
+                st.session_state.pending_page = "Leads List"
+                st.rerun()
+
+            st.divider()
 
 
 def show_quick_capture():
@@ -929,6 +1386,10 @@ def show_quick_capture():
             image_text, ocr_warning = extract_text_from_card_image(uploaded_card)
             if ocr_warning:
                 st.warning(ocr_warning)
+
+    if st.session_state.pop("quick_capture_reset", False):
+        st.session_state.quick_capture_text = ""
+        st.session_state.pop("quick_capture_last_result", None)
 
     if "quick_capture_text" not in st.session_state:
         st.session_state.quick_capture_text = image_text
@@ -994,14 +1455,16 @@ def show_quick_capture():
         local_name = st.text_input("Local Name", value=parsed["local_name"])
         show_confidence("local_name")
         organization_type = st.selectbox(
-            "Organization Type [CHECK]",
+            "Organization Type",
             ORG_TYPE_OPTIONS,
             index=ORG_TYPE_OPTIONS.index("Overseas Agent"),
+            key="capture_organization_type",
         )
         customer_status = st.selectbox(
-            "Customer Status [CHECK]",
+            "Customer Status",
             CUSTOMER_STATUS_OPTIONS,
             index=CUSTOMER_STATUS_OPTIONS.index("Customer"),
+            key="capture_customer_status",
         )
         country = st.text_input("Country", value=parsed["country"])
         show_confidence("country")
@@ -1025,14 +1488,16 @@ def show_quick_capture():
         whatsapp = st.text_input("Whatsapp", value=parsed["whatsapp"])
         show_confidence("whatsapp")
         relationship_status = st.selectbox(
-            "Relationship [CHECK]",
+            "Relationship",
             RELATIONSHIP_STATUS_OPTIONS,
             index=RELATIONSHIP_STATUS_OPTIONS.index("Active"),
+            key="capture_relationship_status",
         )
 
     save_as = st.radio(
         "Save as",
         CAPTURE_SAVE_AS_OPTIONS,
+        index=CAPTURE_SAVE_AS_OPTIONS.index("Customer"),
         horizontal=True,
     )
 
@@ -1116,15 +1581,21 @@ def show_quick_capture():
         cancel_clicked = st.button("Cancel")
 
     if clear_clicked:
-        st.session_state.quick_capture_text = ""
+        st.session_state.quick_capture_reset = True
+        st.session_state.pop("quick_capture_last_result", None)
         st.rerun()
 
     if cancel_clicked:
+        st.session_state.pop("quick_capture_last_result", None)
         st.info("Capture canceled.")
         return
 
     if save_clicked:
         result = save_captured_crm_record(record, save_as, duplicate_action)
+        st.session_state.quick_capture_last_result = {
+            "result": result,
+            "save_as": save_as,
+        }
         st.success(
             "Saved "
             f"{save_as.lower()} "
@@ -1133,17 +1604,27 @@ def show_quick_capture():
             + (f", lead #{result['lead_id']}" if result["lead_id"] else "")
             + ")."
         )
+
+    saved_result_state = st.session_state.get("quick_capture_last_result")
+    if saved_result_state:
+        result = saved_result_state["result"]
+        st.divider()
+        st.subheader("Saved Record")
         link_col1, link_col2, link_col3 = st.columns(3)
         with link_col1:
-            if st.button("View Lead", disabled=not result["lead_id"]):
+            if st.button("View Lead", disabled=not result["lead_id"], key="quick_capture_view_lead"):
                 st.session_state.selected_lead_id = result["lead_id"]
-                st.session_state.page = "Leads List"
+                st.session_state.pending_page = "Leads List"
                 st.rerun()
         with link_col2:
-            st.button("View Organization", disabled=not result["organization_id"])
+            if st.button("View Organization", disabled=not result["lead_id"], key="quick_capture_view_org"):
+                st.session_state.selected_lead_id = result["lead_id"]
+                st.session_state.pending_page = "Leads List"
+                st.rerun()
         with link_col3:
-            if st.button("Add Another"):
-                st.session_state.quick_capture_text = ""
+            if st.button("Add Another", key="quick_capture_add_another"):
+                st.session_state.quick_capture_reset = True
+                st.session_state.pop("quick_capture_last_result", None)
                 st.rerun()
 
 
@@ -1356,135 +1837,155 @@ def show_lead_detail(lead_id):
         st.warning("Lead not found.")
         if st.button("Back to Leads List"):
             st.session_state.selected_lead_id = None
-            st.session_state.page = "Leads List"
+            st.session_state.pending_page = "Leads List"
             st.rerun()
         return
 
     lead = detail["lead"]
     organization = detail["organization"]
     contact = detail["contact"]
+    activities = detail.get("activities", [])
     edit_key = f"lead_detail_edit_{lead_id}"
 
     contact_name = detail_value(contact, "name") or detail_value(lead, "contact_person") or "No contact linked"
+    job_title = detail_value(contact, "job_title") or detail_value(lead, "job_title")
     organization_name = detail_value(organization, "name") or detail_value(lead, "company_name") or "No organization linked"
+    location = " / ".join(
+        item for item in [
+            detail_value(organization, "country") or detail_value(lead, "country"),
+            detail_value(organization, "city") or detail_value(lead, "city"),
+        ]
+        if item
+    )
     lead_status = detail_value(lead, "lead_status", "New")
     customer_status = detail_value(organization, "customer_status", "")
     relationship_status = detail_value(contact, "relationship_status", "")
 
     if st.button("Back to Leads List"):
         st.session_state.selected_lead_id = None
-        st.session_state.page = "Leads List"
+        st.session_state.pending_page = "Leads List"
         st.rerun()
 
     st.title(contact_name)
-    st.caption(organization_name)
-    header_cols = st.columns(3)
-    header_cols[0].metric("Lead Status", lead_status)
-    header_cols[1].metric("Customer Status", customer_status or "No organization linked")
-    header_cols[2].metric("Relationship", relationship_status or "No contact linked")
+    st.caption(" | ".join(item for item in [job_title, organization_name, location] if item))
 
-    comm_cols = st.columns(4)
     email = detail_value(contact, "email") or detail_value(lead, "email")
     phone = detail_value(contact, "phone") or detail_value(lead, "phone")
     whatsapp = detail_value(contact, "whatsapp") or detail_value(lead, "whatsapp")
     wechat = detail_value(contact, "wechat") or detail_value(lead, "wechat")
-
-    with comm_cols[0]:
-        if email:
-            st.link_button("Email", f"mailto:{email}")
-        else:
-            st.button("Email", disabled=True)
-    with comm_cols[1]:
-        if phone:
-            st.link_button("Call", f"tel:{phone}")
-        else:
-            st.button("Call", disabled=True)
-    with comm_cols[2]:
-        if whatsapp:
-            whatsapp_number = re.sub(r"[^0-9]", "", whatsapp)
-            if whatsapp_number:
-                st.link_button("WhatsApp", f"https://wa.me/{whatsapp_number}")
-            else:
-                st.button("WhatsApp", disabled=True)
-        else:
-            st.button("WhatsApp", disabled=True)
-    with comm_cols[3]:
-        if wechat:
-            st.text_input("WeChat ID", value=wechat, disabled=True)
-            components.html(
-                f"""
-                <button
-                    style="background:#1c2636;color:#edf2f7;border:1px solid #3d4b63;border-radius:6px;padding:8px 12px;cursor:pointer;"
-                    onclick="navigator.clipboard.writeText({wechat!r})"
-                >
-                    Copy
-                </button>
-                """,
-                height=44,
-            )
-        else:
-            st.button("WeChat", disabled=True)
-
-    st.divider()
-    action_cols = st.columns(5)
-    for col, action in zip(
-        action_cols,
-        ["Contacted", "Replied", "Qualified", "Disqualified", "Converted"],
-    ):
-        if col.button(f"Mark {action}", key=f"lead_action_{action}_{lead_id}"):
-            update_lead_status_action(lead_id, action)
-            st.rerun()
-
-    relationship_cols = st.columns(5)
-    for col, status in zip(
-        relationship_cols,
-        ["Connected", "Introduced", "Warm", "Active", "Inactive"],
-    ):
-        disabled = not contact
-        if col.button(f"Mark {status}", key=f"contact_action_{status}_{lead_id}", disabled=disabled):
-            update_contact_relationship_action(contact["id"], status)
-            st.rerun()
-
-    customer_cols = st.columns(4)
-    for col, status in zip(customer_cols, ["Prospect", "Qualified", "Customer", "Inactive"]):
-        disabled = not organization
-        if col.button(f"Mark {status}", key=f"org_action_{status}_{lead_id}", disabled=disabled):
-            update_organization_customer_action(organization["id"], status)
-            st.rerun()
-
-    st.divider()
-    st.subheader("Next Follow-up")
-    follow_col1, follow_col2, follow_col3 = st.columns([2, 1, 1])
-    next_action = follow_col1.text_input(
-        "Next Action",
-        value=detail_value(lead, "next_action"),
-        key=f"next_action_{lead_id}",
-    )
-    next_action_date = follow_col2.text_input(
-        "Next Action Date",
-        value=detail_value(lead, "next_action_date"),
-        key=f"next_action_date_{lead_id}",
-    )
-    if follow_col3.button("Save Next Follow-up", key=f"save_follow_{lead_id}"):
-        update_lead_next_follow_up(lead_id, next_action, next_action_date)
-        st.success("Next follow-up saved.")
-        st.rerun()
-
-    st.divider()
-    edit_col1, edit_col2, edit_col3 = st.columns(3)
-    if edit_col1.button("Edit", disabled=st.session_state.get(edit_key, False)):
-        st.session_state[edit_key] = True
-        st.rerun()
     editing = st.session_state.get(edit_key, False)
 
     org_data = {}
     contact_data = {}
     lead_data = {}
 
-    org_col, contact_col, lead_col = st.columns(3)
+    def render_comm_actions():
+        comm_cols = st.columns(4)
+        with comm_cols[0]:
+            if email:
+                st.link_button("Email", f"mailto:{email}")
+            else:
+                st.button("Email", disabled=True)
+        with comm_cols[1]:
+            if phone:
+                st.link_button("Call", f"tel:{phone}")
+            else:
+                st.button("Call", disabled=True)
+        with comm_cols[2]:
+            whatsapp_number = re.sub(r"[^0-9]", "", whatsapp or "")
+            if whatsapp_number:
+                st.link_button("WhatsApp", f"https://wa.me/{whatsapp_number}")
+            else:
+                st.button("WhatsApp", disabled=True)
+        with comm_cols[3]:
+            if wechat:
+                st.text_input("WeChat ID", value=wechat, disabled=True, key=f"wechat_copy_{lead_id}")
+                components.html(
+                    f"""
+                    <button
+                        style="background:#1c2636;color:#edf2f7;border:1px solid #3d4b63;border-radius:6px;padding:8px 12px;cursor:pointer;"
+                        onclick="navigator.clipboard.writeText({wechat!r})"
+                    >
+                        Copy
+                    </button>
+                    """,
+                    height=44,
+                )
+            else:
+                st.button("WeChat", disabled=True)
 
-    with org_col:
-        st.subheader("Organization")
+    def render_activity_list(limit=None):
+        shown_activities = activities[:limit] if limit else activities
+        if not shown_activities:
+            st.info("No activities yet.")
+            return
+        for activity in shown_activities:
+            timestamp = detail_value(activity, "activity_at") or detail_value(activity, "created_at")
+            description = detail_value(activity, "description") or detail_value(activity, "summary")
+            user = detail_value(activity, "user", "admin")
+            st.markdown(f"**{timestamp}** - {detail_value(activity, 'activity_type')}")
+            st.write(description)
+            st.caption(f"User: {user}")
+
+    def render_status_actions():
+        st.markdown("**Lead**")
+        action_cols = st.columns(5)
+        for col, action in zip(action_cols, ["Contacted", "Replied", "Qualified", "Disqualified", "Converted"]):
+            if col.button(action, key=f"lead_action_{action}_{lead_id}"):
+                update_lead_status_action(lead_id, action)
+                st.rerun()
+
+        st.markdown("**Relationship**")
+        relationship_cols = st.columns(5)
+        for col, status in zip(relationship_cols, ["Connected", "Introduced", "Warm", "Active", "Inactive"]):
+            if col.button(status, key=f"contact_action_{status}_{lead_id}", disabled=not contact):
+                update_contact_relationship_action(contact["id"], status)
+                st.rerun()
+
+        st.markdown("**Customer**")
+        customer_cols = st.columns(4)
+        for col, status in zip(customer_cols, ["Prospect", "Qualified", "Customer", "Inactive"]):
+            if col.button(status, key=f"org_action_{status}_{lead_id}", disabled=not organization):
+                update_organization_customer_action(organization["id"], status)
+                st.rerun()
+
+    overview_tab, organization_tab, contact_tab, activities_tab, notes_tab = st.tabs(
+        ["Overview", "Organization", "Contact", "Activities", "Notes"]
+    )
+
+    with overview_tab:
+        status_cols = st.columns(3)
+        status_cols[0].metric("Lead Status", lead_status)
+        status_cols[1].metric("Relationship Status", relationship_status or "No contact linked")
+        status_cols[2].metric("Customer Status", customer_status or "No organization linked")
+
+        st.subheader("Communication")
+        render_comm_actions()
+
+        st.subheader("Next Follow-up")
+        follow_col1, follow_col2, follow_col3, follow_col4 = st.columns([2, 1, 1, 1])
+        next_action = follow_col1.text_input("Next Action", value=detail_value(lead, "next_action"), key=f"next_action_{lead_id}")
+        next_action_date = follow_col2.text_input("Next Action Date", value=detail_value(lead, "next_action_date"), key=f"next_action_date_{lead_id}")
+        if follow_col3.button("Save Follow-up", key=f"save_follow_{lead_id}"):
+            update_lead_next_follow_up(lead_id, next_action, next_action_date)
+            st.success("Next follow-up saved.")
+            st.rerun()
+        if follow_col4.button("Mark Completed", key=f"complete_follow_{lead_id}"):
+            complete_follow_up(lead_id)
+            st.success("Follow-up completed.")
+            st.rerun()
+
+        st.subheader("Relationship Actions")
+        render_status_actions()
+
+        st.subheader("Recent Activity")
+        render_activity_list(limit=5)
+
+    with organization_tab:
+        edit_col1, edit_col2, edit_col3 = st.columns(3)
+        if edit_col1.button("Edit", disabled=editing, key=f"org_edit_{lead_id}"):
+            st.session_state[edit_key] = True
+            st.rerun()
         if not organization:
             st.info("No organization linked.")
         org_data["name"] = st.text_input("Organization Name", value=detail_value(organization, "name"), disabled=not editing or not organization)
@@ -1499,6 +2000,22 @@ def show_lead_detail(lead_id):
         org_data["province"] = st.text_input("Province", value=detail_value(organization, "province"), disabled=not editing or not organization)
         org_data["city"] = st.text_input("City", value=detail_value(organization, "city"), disabled=not editing or not organization)
         org_data["website"] = st.text_input("Website", value=detail_value(organization, "website"), disabled=not editing or not organization)
+        org_data["founding_date"] = st.text_input("Founding Date", value=detail_value(organization, "founding_date"), disabled=not editing or not organization)
+        org_data["anniversary_date"] = st.text_input("Cooperation Anniversary", value=detail_value(organization, "anniversary_date"), disabled=not editing or not organization)
+        org_data["preferred_language"] = st.selectbox(
+            "Preferred Language",
+            PREFERRED_LANGUAGE_OPTIONS,
+            index=PREFERRED_LANGUAGE_OPTIONS.index(detail_value(organization, "preferred_language", "English")) if detail_value(organization, "preferred_language", "English") in PREFERRED_LANGUAGE_OPTIONS else 0,
+            disabled=not editing or not organization,
+            key=f"org_pref_lang_{lead_id}",
+        )
+        org_data["relationship_tone"] = st.selectbox(
+            "Relationship Tone",
+            RELATIONSHIP_TONE_OPTIONS,
+            index=RELATIONSHIP_TONE_OPTIONS.index(detail_value(organization, "relationship_tone", "Warm")) if detail_value(organization, "relationship_tone", "Warm") in RELATIONSHIP_TONE_OPTIONS else 1,
+            disabled=not editing or not organization,
+            key=f"org_tone_{lead_id}",
+        )
         org_data["membership"] = st.text_input("Membership", value=detail_value(organization, "membership"), disabled=not editing or not organization)
         org_data["customer_status"] = st.selectbox(
             "Customer Status",
@@ -1507,9 +2024,50 @@ def show_lead_detail(lead_id):
             disabled=not editing or not organization,
         )
         org_data["notes"] = st.text_area("Organization Notes", value=detail_value(organization, "notes"), disabled=not editing or not organization)
+        if editing:
+            if edit_col2.button("Save", key=f"org_save_{lead_id}"):
+                update_lead_detail(lead_id, org_data if organization else {}, {}, lead)
+                if organization:
+                    sync_date_based_occasions(organization_id=organization["id"])
+                st.session_state[edit_key] = False
+                st.success("Organization saved.")
+                st.rerun()
+            if edit_col3.button("Cancel", key=f"org_cancel_{lead_id}"):
+                st.session_state[edit_key] = False
+                st.rerun()
+        occasion_cols = st.columns(2)
+        with occasion_cols[0]:
+            with st.popover("Add Occasion", disabled=not organization):
+                occasion_type = st.selectbox("Type", OCCASION_TYPE_OPTIONS, key=f"org_occ_type_{lead_id}")
+                occasion_name = st.text_input("Occasion Name", key=f"org_occ_name_{lead_id}")
+                occasion_date = st.text_input("Occasion Date", placeholder="YYYY-MM-DD", key=f"org_occ_date_{lead_id}")
+                if st.button("Create Occasion", key=f"org_occ_create_{lead_id}"):
+                    create_relationship_occasion(
+                        {
+                            "organization_id": organization["id"],
+                            "contact_id": contact["id"] if contact else None,
+                            "occasion_type": occasion_type,
+                            "occasion_name": occasion_name,
+                            "occasion_date": occasion_date,
+                            "country": detail_value(organization, "country"),
+                            "preferred_language": detail_value(organization, "preferred_language", "English"),
+                            "message_tone": detail_value(organization, "relationship_tone", "Warm"),
+                            "preferred_channel": "WeChat",
+                            "reminder_days_before": 7,
+                        }
+                    )
+                    st.rerun()
+        with occasion_cols[1]:
+            if st.button("Add Holiday Reminders for this Country", disabled=not organization, key=f"org_add_holidays_{lead_id}"):
+                created = add_country_holiday_reminders(organization["id"], contact["id"] if contact else None)
+                st.success(f"Added {created} holiday reminders.")
+                st.rerun()
 
-    with contact_col:
-        st.subheader("Contact")
+    with contact_tab:
+        edit_col1, edit_col2, edit_col3 = st.columns(3)
+        if edit_col1.button("Edit", disabled=editing, key=f"contact_edit_{lead_id}"):
+            st.session_state[edit_key] = True
+            st.rerun()
         if not contact:
             st.info("No contact linked.")
         contact_data["name"] = st.text_input("Contact Name", value=detail_value(contact, "name"), disabled=not editing or not contact)
@@ -1518,6 +2076,28 @@ def show_lead_detail(lead_id):
         contact_data["phone"] = st.text_input("Phone", value=detail_value(contact, "phone"), disabled=not editing or not contact)
         contact_data["wechat"] = st.text_input("WeChat", value=detail_value(contact, "wechat"), disabled=not editing or not contact)
         contact_data["whatsapp"] = st.text_input("Whatsapp", value=detail_value(contact, "whatsapp"), disabled=not editing or not contact)
+        contact_data["birthday"] = st.text_input("Birthday", value=detail_value(contact, "birthday"), disabled=not editing or not contact)
+        contact_data["preferred_language"] = st.selectbox(
+            "Preferred Language",
+            PREFERRED_LANGUAGE_OPTIONS,
+            index=PREFERRED_LANGUAGE_OPTIONS.index(detail_value(contact, "preferred_language", "English")) if detail_value(contact, "preferred_language", "English") in PREFERRED_LANGUAGE_OPTIONS else 0,
+            disabled=not editing or not contact,
+            key=f"contact_pref_lang_{lead_id}",
+        )
+        contact_data["preferred_channel"] = st.selectbox(
+            "Preferred Channel",
+            PREFERRED_CHANNEL_OPTIONS,
+            index=PREFERRED_CHANNEL_OPTIONS.index(detail_value(contact, "preferred_channel", "WeChat")) if detail_value(contact, "preferred_channel", "WeChat") in PREFERRED_CHANNEL_OPTIONS else 3,
+            disabled=not editing or not contact,
+            key=f"contact_pref_channel_{lead_id}",
+        )
+        contact_data["relationship_tone"] = st.selectbox(
+            "Relationship Tone",
+            RELATIONSHIP_TONE_OPTIONS,
+            index=RELATIONSHIP_TONE_OPTIONS.index(detail_value(contact, "relationship_tone", "Warm")) if detail_value(contact, "relationship_tone", "Warm") in RELATIONSHIP_TONE_OPTIONS else 1,
+            disabled=not editing or not contact,
+            key=f"contact_tone_{lead_id}",
+        )
         contact_data["relationship_status"] = st.selectbox(
             "Relationship Status",
             RELATIONSHIP_STATUS_OPTIONS,
@@ -1527,9 +2107,64 @@ def show_lead_detail(lead_id):
         contact_data["last_contacted_at"] = st.text_input("Last Contacted At", value=detail_value(contact, "last_contacted_at"), disabled=not editing or not contact)
         contact_data["next_follow_up_at"] = st.text_input("Next Follow-up At", value=detail_value(contact, "next_follow_up_at"), disabled=not editing or not contact)
         contact_data["notes"] = st.text_area("Contact Notes", value=detail_value(contact, "notes"), disabled=not editing or not contact)
+        if editing:
+            if edit_col2.button("Save", key=f"contact_save_{lead_id}"):
+                update_lead_detail(lead_id, {}, contact_data if contact else {}, lead)
+                if contact:
+                    sync_date_based_occasions(
+                        organization_id=organization["id"] if organization else None,
+                        contact_id=contact["id"],
+                    )
+                st.session_state[edit_key] = False
+                st.success("Contact saved.")
+                st.rerun()
+            if edit_col3.button("Cancel", key=f"contact_cancel_{lead_id}"):
+                st.session_state[edit_key] = False
+                st.rerun()
+        with st.popover("Add Occasion", disabled=not contact):
+            occasion_type = st.selectbox("Type", OCCASION_TYPE_OPTIONS, key=f"contact_occ_type_{lead_id}")
+            occasion_name = st.text_input("Occasion Name", key=f"contact_occ_name_{lead_id}")
+            occasion_date = st.text_input("Occasion Date", placeholder="YYYY-MM-DD", key=f"contact_occ_date_{lead_id}")
+            if st.button("Create Occasion", key=f"contact_occ_create_{lead_id}"):
+                create_relationship_occasion(
+                    {
+                        "organization_id": organization["id"] if organization else None,
+                        "contact_id": contact["id"],
+                        "occasion_type": occasion_type,
+                        "occasion_name": occasion_name,
+                        "occasion_date": occasion_date,
+                        "country": detail_value(organization, "country"),
+                        "preferred_language": detail_value(contact, "preferred_language", "English"),
+                        "message_tone": detail_value(contact, "relationship_tone", "Warm"),
+                        "preferred_channel": detail_value(contact, "preferred_channel", "WeChat"),
+                        "reminder_days_before": 7,
+                    }
+                )
+                st.rerun()
 
-    with lead_col:
-        st.subheader("Lead")
+    with activities_tab:
+        st.subheader("Activity Timeline")
+        render_activity_list()
+
+    with notes_tab:
+        st.subheader("Relationship Notes")
+        notes_value = st.text_area(
+            "Notes",
+            value=detail_value(lead, "notes"),
+            height=360,
+            key=f"relationship_notes_{lead_id}",
+        )
+        if st.button("Save Notes", key=f"save_notes_{lead_id}"):
+            update_lead_notes(lead_id, notes_value)
+            st.success("Notes saved.")
+            st.rerun()
+
+        st.divider()
+        st.subheader("Lead Fields")
+        edit_col1, edit_col2, edit_col3 = st.columns(3)
+        if edit_col1.button("Edit Lead", disabled=editing, key=f"lead_edit_{lead_id}"):
+            st.session_state[edit_key] = True
+            st.rerun()
         lead_data["source"] = st.text_input("Source", value=detail_value(lead, "source"), disabled=not editing)
         lead_data["campaign"] = st.text_input("Campaign", value=detail_value(lead, "campaign"), disabled=not editing)
         lead_data["lead_status"] = st.selectbox(
@@ -1544,21 +2179,15 @@ def show_lead_detail(lead_id):
         lead_data["notes"] = st.text_area("Lead Notes", value=detail_value(lead, "notes"), disabled=not editing)
         st.text_input("Created At", value=detail_value(lead, "created_at"), disabled=True)
         st.text_input("Updated At", value=detail_value(lead, "updated_at"), disabled=True)
-
-    if editing:
-        if edit_col2.button("Save"):
-            update_lead_detail(
-                lead_id,
-                org_data if organization else {},
-                contact_data if contact else {},
-                lead_data,
-            )
-            st.session_state[edit_key] = False
-            st.success("Lead detail saved.")
-            st.rerun()
-        if edit_col3.button("Cancel"):
-            st.session_state[edit_key] = False
-            st.rerun()
+        if editing:
+            if edit_col2.button("Save", key=f"lead_save_{lead_id}"):
+                update_lead_detail(lead_id, {}, {}, lead_data)
+                st.session_state[edit_key] = False
+                st.success("Lead saved.")
+                st.rerun()
+            if edit_col3.button("Cancel", key=f"lead_cancel_{lead_id}"):
+                st.session_state[edit_key] = False
+                st.rerun()
 
 
 def show_leads_list():
@@ -1651,6 +2280,9 @@ def show_leads_list():
         else:
             st.error("Could not find that lead to convert.")
 
+pending_page = st.session_state.pop("pending_page", None)
+if pending_page:
+    st.session_state.page = pending_page
 
 with st.sidebar:
     st.title("1Aim")
@@ -1667,7 +2299,7 @@ with st.sidebar:
 
     page = st.radio(
         "Menu",
-        ["Dashboard", "Quick Capture", "Leads Import", "Leads List"],
+        ["Dashboard", "Follow-up Queue", "Occasion Reminders", "Quick Capture", "Leads Import", "Leads List", "Admin"],
         key="page",
     )
 
@@ -1675,9 +2307,15 @@ apply_global_typography(st.session_state.ui_scale)
 
 if page == "Dashboard":
     show_dashboard()
+elif page == "Follow-up Queue":
+    show_follow_up_queue()
+elif page == "Occasion Reminders":
+    show_occasion_reminders()
 elif page == "Quick Capture":
     show_quick_capture()
 elif page == "Leads Import":
     show_leads_import()
+elif page == "Admin":
+    show_admin()
 else:
     show_leads_list()

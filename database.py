@@ -1,8 +1,14 @@
 import sqlite3
+import time
 from datetime import date
+from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 
 DB_PATH = Path("data/growth_engine.db")
+BACKUP_DIR = Path("data/backups")
+MAX_BACKUPS = 30
+_BACKUP_CREATED_THIS_PROCESS = False
 
 
 def get_connection():
@@ -12,7 +18,85 @@ def get_connection():
     return conn
 
 
+def create_database_backup():
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not DB_PATH.exists():
+        return None
+
+    backup_path = None
+    for _ in range(5):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        candidate_path = BACKUP_DIR / f"growth_engine_{timestamp}.db"
+        if not candidate_path.exists():
+            backup_path = candidate_path
+            break
+        time.sleep(1)
+
+    if backup_path is None:
+        raise FileExistsError("Could not create a unique timestamped database backup.")
+
+    source = sqlite3.connect(DB_PATH)
+    try:
+        destination = sqlite3.connect(backup_path)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+    finally:
+        source.close()
+
+    prune_database_backups()
+    return backup_path
+
+
+def create_database_backup_once():
+    global _BACKUP_CREATED_THIS_PROCESS
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    if _BACKUP_CREATED_THIS_PROCESS:
+        return None
+
+    backup_path = create_database_backup()
+    _BACKUP_CREATED_THIS_PROCESS = True
+    return backup_path
+
+
+def get_database_backups():
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted(
+        BACKUP_DIR.glob("growth_engine_*.db"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def prune_database_backups():
+    backups = get_database_backups()
+    for backup_path in backups[MAX_BACKUPS:]:
+        backup_path.unlink(missing_ok=True)
+
+
+def get_database_backup_status():
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backups = get_database_backups()
+    latest_backup = backups[0] if backups else None
+
+    return {
+        "db_size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+        "backup_count": len(backups),
+        "latest_backup_time": (
+            datetime.fromtimestamp(latest_backup.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            if latest_backup
+            else ""
+        ),
+        "latest_backup_name": latest_backup.name if latest_backup else "",
+    }
+
+
 def init_db():
+    create_database_backup_once()
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -58,6 +142,10 @@ def init_db():
         city TEXT,
         website TEXT,
         local_name TEXT,
+        founding_date TEXT,
+        anniversary_date TEXT,
+        preferred_language TEXT,
+        relationship_tone TEXT,
         customer_status TEXT DEFAULT 'Prospect',
         source TEXT,
         membership TEXT,
@@ -82,6 +170,10 @@ def init_db():
         job_title TEXT,
         source TEXT,
         relationship_status TEXT DEFAULT 'New',
+        birthday TEXT,
+        preferred_language TEXT,
+        preferred_channel TEXT,
+        relationship_tone TEXT,
         relationship_score INTEGER DEFAULT 5,
         last_touch_at TEXT,
         last_contacted_at TEXT,
@@ -114,6 +206,7 @@ def init_db():
         campaign TEXT,
         lead_status TEXT DEFAULT 'New',
         interest_level TEXT,
+        priority_score INTEGER DEFAULT 0,
         next_action TEXT,
         next_action_date TEXT,
         status TEXT DEFAULT 'New Lead',
@@ -172,13 +265,53 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS activities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lead_id INTEGER,
+        organization_id INTEGER,
         contact_id INTEGER,
         opportunity_id INTEGER,
         quotation_id INTEGER,
         activity_type TEXT,
+        description TEXT,
+        user TEXT,
         summary TEXT,
         activity_at TEXT DEFAULT CURRENT_TIMESTAMP,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS relationship_occasions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id INTEGER,
+        contact_id INTEGER,
+        occasion_type TEXT,
+        occasion_name TEXT,
+        occasion_date TEXT,
+        country TEXT,
+        is_recurring INTEGER DEFAULT 1,
+        recurrence_rule TEXT,
+        preferred_channel TEXT,
+        preferred_language TEXT,
+        message_tone TEXT,
+        reminder_days_before INTEGER DEFAULT 7,
+        status TEXT DEFAULT 'Active',
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS holiday_library (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        country TEXT,
+        holiday_name TEXT,
+        holiday_date TEXT,
+        is_recurring INTEGER DEFAULT 1,
+        recurrence_rule TEXT,
+        default_message_theme TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -214,6 +347,10 @@ def init_db():
     add_column("tasks", "campaign_name TEXT")
     add_column("tasks", "assigned_to INTEGER")
     add_column("tasks", "created_by INTEGER")
+    add_column("activities", "lead_id INTEGER")
+    add_column("activities", "organization_id INTEGER")
+    add_column("activities", "description TEXT")
+    add_column("activities", "user TEXT")
     add_column("opportunities", "owner INTEGER")
     add_column("quotations", "owner INTEGER")
     add_column("organizations", "type TEXT DEFAULT 'Other'")
@@ -222,6 +359,10 @@ def init_db():
     add_column("organizations", "city TEXT")
     add_column("organizations", "website TEXT")
     add_column("organizations", "local_name TEXT")
+    add_column("organizations", "founding_date TEXT")
+    add_column("organizations", "anniversary_date TEXT")
+    add_column("organizations", "preferred_language TEXT")
+    add_column("organizations", "relationship_tone TEXT")
     add_column("organizations", "customer_status TEXT DEFAULT 'Prospect'")
     add_column("organizations", "source TEXT")
     add_column("organizations", "membership TEXT")
@@ -238,6 +379,10 @@ def init_db():
     add_column("contacts", "whatsapp TEXT")
     add_column("contacts", "membership TEXT")
     add_column("contacts", "relationship_status TEXT DEFAULT 'New'")
+    add_column("contacts", "birthday TEXT")
+    add_column("contacts", "preferred_language TEXT")
+    add_column("contacts", "preferred_channel TEXT")
+    add_column("contacts", "relationship_tone TEXT")
     add_column("contacts", "status TEXT DEFAULT 'New Lead'")
     add_column("contacts", "owner TEXT DEFAULT 'admin'")
     add_column("contacts", "last_contacted_at TEXT")
@@ -258,6 +403,7 @@ def init_db():
     add_column("leads", "campaign TEXT")
     add_column("leads", "lead_status TEXT DEFAULT 'New'")
     add_column("leads", "interest_level TEXT")
+    add_column("leads", "priority_score INTEGER DEFAULT 0")
     add_column("leads", "next_action TEXT")
     add_column("leads", "next_action_date TEXT")
     add_column("leads", "status TEXT DEFAULT 'New Lead'")
@@ -338,6 +484,13 @@ def init_db():
     )
 
     migrate_crm_records(cur)
+    seed_holiday_library(cur)
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO app_settings (setting_key, setting_value, updated_at)
+        VALUES ('daily_outreach_capacity', '10', CURRENT_TIMESTAMP)
+        """
+    )
 
     user_count = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     if user_count == 0:
@@ -399,6 +552,166 @@ def row_value(row, key, default=""):
     if value is None:
         return default
     return value
+
+
+def today_iso():
+    return date.today().isoformat()
+
+
+def days_from_today(days):
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def next_action_for_state(lead_status=None, relationship_status=None):
+    relationship_status = clean_value(relationship_status)
+    lead_status = clean_value(lead_status) or "New"
+
+    if relationship_status == "Active":
+        return "Relationship Maintenance"
+    if relationship_status == "Warm":
+        return "Relationship Nurturing"
+    if lead_status == "Contacted":
+        return "Follow-up"
+    if lead_status in ["Replied", "Qualified"]:
+        return "Relationship Nurturing"
+    return "Send Introduction"
+
+
+def parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def calculate_priority_score(row):
+    country = normalize(row_value(row, "country", ""))
+    membership = normalize(row_value(row, "membership", ""))
+    relationship_status = clean_value(row_value(row, "relationship_status", "New"))
+    lead_status = clean_value(row_value(row, "lead_status", "New"))
+    customer_status = clean_value(row_value(row, "customer_status", "Prospect"))
+    last_contacted = row_value(row, "last_contacted_at", "")
+
+    score = 0
+
+    if country == "china":
+        score += 25
+    elif country == "vietnam":
+        score += 20
+    elif country in ["usa", "united states", "united states of america"]:
+        score += 15
+    else:
+        score += 10
+
+    for network in ["olo", "wca", "jctrans"]:
+        if network in membership:
+            score += 15
+
+    score += {
+        "New": 5,
+        "Connected": 10,
+        "Introduced": 15,
+        "Warm": 25,
+        "Active": 30,
+    }.get(relationship_status, 0)
+
+    score += {
+        "New": 5,
+        "Contacted": 10,
+        "Replied": 20,
+        "Qualified": 30,
+    }.get(lead_status, 0)
+
+    last_contact_date = parse_iso_date(last_contacted)
+    if not last_contact_date:
+        score += 20
+    else:
+        days_since_contact = (date.today() - last_contact_date).days
+        if days_since_contact > 90:
+            score += 15
+        elif days_since_contact > 30:
+            score += 10
+
+    if customer_status == "Customer":
+        score += 20
+    elif customer_status == "Qualified":
+        score += 10
+
+    return min(score, 100)
+
+
+def recommended_action_for_row(row):
+    customer_status = clean_value(row_value(row, "customer_status", ""))
+    relationship_status = clean_value(row_value(row, "relationship_status", ""))
+    lead_status = clean_value(row_value(row, "lead_status", "New"))
+
+    if customer_status == "Customer":
+        return "Check current business opportunities"
+    if relationship_status == "Active":
+        return "Maintain relationship"
+    if relationship_status == "Warm":
+        return "Ask about current Vietnam shipments"
+    if relationship_status in ["Connected", "Introduced"]:
+        return "Start conversation"
+    if lead_status == "New":
+        return "Send introduction"
+    if lead_status == "Contacted":
+        return "Follow up"
+    if lead_status in ["Replied", "Qualified"]:
+        return "Ask about current Vietnam shipments"
+    return next_action_for_state(lead_status, relationship_status)
+
+
+def refresh_lead_priority_scores():
+    conn = get_connection()
+    cur = conn.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+            leads.id,
+            COALESCE(organizations.country, leads.country, '') AS country,
+            COALESCE(organizations.membership, leads.membership, '') AS membership,
+            COALESCE(contacts.relationship_status, 'New') AS relationship_status,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(contacts.last_contacted_at, leads.last_contacted_at, '') AS last_contacted_at,
+            COALESCE(organizations.customer_status, '') AS customer_status,
+            COALESCE(leads.priority_score, 0) AS priority_score
+        FROM leads
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        """
+    ).fetchall()
+
+    updated = 0
+    for row in rows:
+        score = calculate_priority_score(row)
+        if int(row["priority_score"] or 0) == score:
+            continue
+        cur.execute(
+            """
+            UPDATE leads
+            SET priority_score = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (score, row["id"]),
+        )
+        updated += 1
+
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def get_daily_outreach_capacity():
+    raw_capacity = get_app_setting("daily_outreach_capacity", "10")
+    try:
+        capacity = int(raw_capacity)
+    except (TypeError, ValueError):
+        capacity = 10
+    return capacity if capacity in [10, 20, 30, 50] else 10
 
 
 def find_organization(cur, name, country):
@@ -789,6 +1102,9 @@ def lead_exists(cur, organization_id, contact_id, campaign, source=None):
 
 
 def insert_lead(cur, organization_id, contact_id, record):
+    next_action = record.get("next_action") or "Send first introduction"
+    next_action_date = record.get("next_action_date") or days_from_today(1)
+
     cur.execute(
         """
         INSERT INTO leads (
@@ -835,14 +1151,97 @@ def insert_lead(cur, organization_id, contact_id, record):
             record.get("campaign"),
             record.get("lead_status") or "New",
             record.get("interest_level"),
-            record.get("next_action"),
-            record.get("next_action_date"),
+            next_action,
+            next_action_date,
             record.get("status") or record.get("lead_status") or "New",
             record.get("owner") or "admin",
             record.get("notes"),
         ),
     )
     return cur.lastrowid
+
+
+def log_crm_activity(
+    cur,
+    activity_type,
+    description,
+    lead_id=None,
+    organization_id=None,
+    contact_id=None,
+    user="admin",
+):
+    cur.execute(
+        """
+        INSERT INTO activities (
+            lead_id,
+            organization_id,
+            contact_id,
+            activity_type,
+            description,
+            summary,
+            user,
+            activity_at,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (
+            lead_id,
+            organization_id,
+            contact_id,
+            activity_type,
+            description,
+            description,
+            user,
+        ),
+    )
+    return cur.lastrowid
+
+
+def seed_holiday_library(cur):
+    holidays = [
+        ("China", "Chinese New Year", "2026-02-17", 1, "manual_yearly", "health, prosperity, and continued cooperation"),
+        ("China", "Mid-Autumn Festival", "2026-09-25", 1, "manual_yearly", "reunion, harmony, and success"),
+        ("China", "National Day", "2026-10-01", 1, "yearly_mm_dd", "prosperity and success"),
+        ("United States", "New Year's Day", "2026-01-01", 1, "yearly_mm_dd", "health, happiness, and success"),
+        ("United States", "Thanksgiving", "2026-11-26", 1, "manual_yearly", "gratitude and partnership"),
+        ("United States", "Christmas", "2026-12-25", 1, "yearly_mm_dd", "peace, joy, and success"),
+        ("United States", "Independence Day", "2026-07-04", 1, "yearly_mm_dd", "celebration and continued success"),
+        ("Vietnam", "Lunar New Year", "2026-02-17", 1, "manual_yearly", "health, luck, and prosperity"),
+        ("Vietnam", "Mid-Autumn Festival", "2026-09-25", 1, "manual_yearly", "reunion, happiness, and success"),
+        ("Vietnam", "National Day", "2026-09-02", 1, "yearly_mm_dd", "prosperity and success"),
+        ("Vietnam", "Reunification Day", "2026-04-30", 1, "yearly_mm_dd", "peace and continued growth"),
+    ]
+
+    for holiday in holidays:
+        exists = cur.execute(
+            """
+            SELECT id
+            FROM holiday_library
+            WHERE country = ?
+                AND holiday_name = ?
+            LIMIT 1
+            """,
+            (holiday[0], holiday[1]),
+        ).fetchone()
+        if exists:
+            continue
+        cur.execute(
+            """
+            INSERT INTO holiday_library (
+                country,
+                holiday_name,
+                holiday_date,
+                is_recurring,
+                recurrence_rule,
+                default_message_theme,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            holiday,
+        )
 
 
 def migrate_crm_records(cur):
@@ -1288,6 +1687,8 @@ def import_leads(leads, owner="admin"):
         lead = dict(lead)
         lead["source"] = lead.get("source") or "Excel Import"
         lead["lead_status"] = lead.get("lead_status") or "New"
+        lead["next_action"] = lead.get("next_action") or "Send first introduction"
+        lead["next_action_date"] = lead.get("next_action_date") or days_from_today(1)
         lead["owner"] = lead.get("owner") or owner or "admin"
 
         organization_id = upsert_organization(cur, lead)
@@ -1348,6 +1749,16 @@ def import_leads(leads, owner="admin"):
                 lead.get("owner"),
                 lead.get("notes"),
             ),
+        )
+        lead_id = cur.lastrowid
+        log_crm_activity(
+            cur,
+            "Import",
+            f"Lead imported from {lead.get('source') or 'Excel Import'} / {lead.get('campaign') or ''}".strip(),
+            lead_id=lead_id,
+            organization_id=organization_id,
+            contact_id=contact_id,
+            user=lead.get("owner") or owner or "admin",
         )
         imported_count += 1
 
@@ -1435,11 +1846,323 @@ def get_lead_detail(lead_id):
             (lead["contact_id"],),
         ).fetchone()
 
+    activities = conn.execute(
+        """
+        SELECT *
+        FROM activities
+        WHERE lead_id = ?
+            OR (contact_id IS NOT NULL AND contact_id = ?)
+            OR (organization_id IS NOT NULL AND organization_id = ?)
+        ORDER BY COALESCE(activity_at, created_at) DESC, id DESC
+        """,
+        (
+            lead_id,
+            lead["contact_id"],
+            lead["organization_id"],
+        ),
+    ).fetchall()
+
     conn.close()
     return {
         "lead": dict(lead),
         "organization": dict(organization) if organization else None,
         "contact": dict(contact) if contact else None,
+        "activities": [dict(activity) for activity in activities],
+    }
+
+
+def get_crm_follow_up_rows():
+    refresh_lead_priority_scores()
+    conn = get_connection()
+
+    rows = conn.execute(
+        """
+        SELECT
+            leads.id AS lead_id,
+            leads.organization_id,
+            leads.contact_id,
+            COALESCE(contacts.name, contacts.contact_person, contacts.full_name, leads.contact_person, '') AS contact_name,
+            COALESCE(contacts.job_title, leads.job_title, '') AS job_title,
+            COALESCE(organizations.name, leads.company_name, '') AS organization_name,
+            COALESCE(organizations.type, '') AS organization_type,
+            COALESCE(organizations.country, leads.country, '') AS country,
+            COALESCE(organizations.city, leads.city, '') AS city,
+            COALESCE(organizations.membership, leads.membership, '') AS membership,
+            COALESCE(organizations.customer_status, '') AS customer_status,
+            COALESCE(contacts.relationship_status, '') AS relationship_status,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(leads.priority_score, 0) AS priority_score,
+            COALESCE(contacts.last_contacted_at, leads.last_contacted_at, '') AS last_contacted_at,
+            COALESCE(contacts.next_follow_up_at, '') AS contact_next_follow_up_at,
+            COALESCE(leads.next_action, '') AS next_action,
+            COALESCE(leads.next_action_date, '') AS next_action_date,
+            COALESCE(leads.source, '') AS source,
+            COALESCE(leads.campaign, '') AS campaign,
+            COALESCE(leads.owner, 'admin') AS owner,
+            COALESCE(contacts.email, leads.email, '') AS email,
+            COALESCE(contacts.phone, leads.phone, '') AS phone,
+            COALESCE(contacts.wechat, leads.wechat, '') AS wechat,
+            COALESCE(contacts.whatsapp, leads.whatsapp, '') AS whatsapp
+        FROM leads
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        """
+    ).fetchall()
+
+    conn.close()
+    today = date.today()
+    queue_rows = []
+    for row in rows:
+        item = dict(row)
+        item["priority_score"] = calculate_priority_score(item)
+        item["recommended_action"] = recommended_action_for_row(item)
+        next_date_text = item["next_action_date"] or item["contact_next_follow_up_at"]
+        next_date = None
+        if next_date_text:
+            try:
+                next_date = date.fromisoformat(str(next_date_text)[:10])
+            except ValueError:
+                next_date = None
+
+        lead_open = item["lead_status"] in ["New", "Contacted", "Replied", "Qualified"]
+        relationship_open = item["relationship_status"] in ["Connected", "Introduced", "Warm"]
+        due_by_date = next_date is not None and next_date <= today
+        missing_lead_followup = lead_open and not item["next_action_date"]
+        missing_contact_followup = relationship_open and not item["contact_next_follow_up_at"]
+
+        if not (due_by_date or missing_lead_followup or missing_contact_followup):
+            continue
+
+        if next_date and next_date < today:
+            due_bucket = "Overdue"
+            due_rank = 1
+        elif next_date == today:
+            due_bucket = "Today"
+            due_rank = 2
+        elif not next_date:
+            due_bucket = "No Follow-up Date"
+            due_rank = 6
+        elif next_date <= today + timedelta(days=7):
+            due_bucket = "This Week"
+            due_rank = 3
+        else:
+            due_bucket = "Future"
+            due_rank = 7
+
+        status_rank = 6
+        if item["relationship_status"] in ["Warm", "Active"]:
+            status_rank = 3
+        if item["lead_status"] == "Qualified":
+            status_rank = min(status_rank, 4)
+        if item["lead_status"] == "New":
+            status_rank = min(status_rank, 5)
+
+        overdue_rank = 0 if due_bucket == "Overdue" else 1
+        item["due_bucket"] = due_bucket
+        item["sort_rank"] = (-item["priority_score"], overdue_rank, next_date or date.max, status_rank)
+        queue_rows.append(item)
+
+    return sorted(queue_rows, key=lambda item: item["sort_rank"])
+
+
+def initialize_missing_lead_followups(user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    rows = cur.execute(
+        """
+        SELECT
+            leads.id,
+            leads.organization_id,
+            leads.contact_id,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(contacts.relationship_status, '') AS relationship_status
+        FROM leads
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        WHERE COALESCE(leads.lead_status, 'New') <> 'Disqualified'
+            AND (
+                leads.next_action_date IS NULL
+                OR TRIM(leads.next_action_date) = ''
+                OR leads.next_action IS NULL
+                OR TRIM(leads.next_action) = ''
+            )
+        ORDER BY leads.created_at, leads.id
+        """
+    ).fetchall()
+
+    updated = 0
+    scheduled_counts = {}
+    capacity = get_daily_outreach_capacity()
+    for index, lead in enumerate(rows):
+        days_ahead = 0 if index < capacity else ((index - capacity) % 30) + 1
+        next_date = days_from_today(days_ahead)
+        next_action = next_action_for_state(lead["lead_status"], lead["relationship_status"])
+        cur.execute(
+            """
+            UPDATE leads
+            SET next_action = ?,
+                next_action_date = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (next_action, next_date, lead["id"]),
+        )
+        if lead["contact_id"]:
+            cur.execute(
+                """
+                UPDATE contacts
+                SET next_follow_up_at = COALESCE(NULLIF(next_follow_up_at, ''), ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (next_date, lead["contact_id"]),
+            )
+        log_crm_activity(
+            cur,
+            "Follow-up",
+            f"Follow-up initialized: {next_action} on {next_date}",
+            lead_id=lead["id"],
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
+            user=user,
+        )
+        updated += 1
+        scheduled_counts[next_date] = scheduled_counts.get(next_date, 0) + 1
+
+    conn.commit()
+    conn.close()
+    return {
+        "updated": updated,
+        "start_date": days_from_today(1) if updated else "",
+        "end_date": days_from_today(30) if updated else "",
+        "scheduled_counts": scheduled_counts,
+    }
+
+
+def get_crm_dashboard_data():
+    refresh_lead_priority_scores()
+    conn = get_connection()
+    today = today_iso()
+    week_end = days_from_today(7)
+    month_end = days_from_today(30)
+    capacity = get_daily_outreach_capacity()
+
+    kpis = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN leads.next_action_date = ? OR contacts.next_follow_up_at = ? THEN 1 ELSE 0 END) AS due_today,
+            SUM(CASE WHEN (leads.next_action_date <> '' AND leads.next_action_date < ?)
+                      OR (contacts.next_follow_up_at <> '' AND contacts.next_follow_up_at < ?) THEN 1 ELSE 0 END) AS overdue,
+            SUM(CASE WHEN COALESCE(leads.lead_status, 'New') = 'New' THEN 1 ELSE 0 END) AS new_leads,
+            SUM(CASE WHEN contacts.relationship_status IN ('Warm', 'Active') THEN 1 ELSE 0 END) AS warm_relationships,
+            SUM(CASE WHEN leads.lead_status = 'Qualified' THEN 1 ELSE 0 END) AS qualified_leads,
+            COUNT(DISTINCT CASE WHEN organizations.customer_status = 'Customer' THEN organizations.id END) AS customers,
+            COUNT(DISTINCT CASE WHEN COALESCE(leads.priority_score, 0) >= 70 THEN contacts.id END) AS high_priority_contacts,
+            SUM(CASE WHEN LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = 'china' THEN 1 ELSE 0 END) AS china_leads,
+            COUNT(DISTINCT CASE WHEN LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = 'china'
+                      AND contacts.relationship_status IN ('Warm', 'Active') THEN contacts.id END) AS china_warm_relationships,
+            SUM(CASE WHEN COALESCE(leads.next_action_date, '') = ''
+                      AND COALESCE(contacts.next_follow_up_at, '') = '' THEN 1 ELSE 0 END) AS no_followup
+        FROM leads
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        """,
+        (today, today, today, today),
+    ).fetchone()
+
+    outreach = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN leads.next_action_date = ? THEN 1 ELSE 0 END) AS today_count,
+            SUM(CASE WHEN leads.next_action_date >= ? AND leads.next_action_date <= ? THEN 1 ELSE 0 END) AS week_count,
+            SUM(CASE WHEN leads.next_action_date >= ? AND leads.next_action_date <= ? THEN 1 ELSE 0 END) AS month_count
+        FROM leads
+        WHERE COALESCE(leads.lead_status, 'New') <> 'Disqualified'
+            AND COALESCE(leads.next_action_date, '') <> ''
+        """,
+        (today, today, week_end, today, month_end),
+    ).fetchone()
+
+    campaign_progress = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(campaign, ''), NULLIF(source, ''), 'Unknown') AS campaign,
+            COUNT(*) AS total_leads,
+            SUM(CASE WHEN lead_status = 'Contacted' THEN 1 ELSE 0 END) AS contacted,
+            SUM(CASE WHEN lead_status = 'Replied' THEN 1 ELSE 0 END) AS replied,
+            SUM(CASE WHEN lead_status = 'Qualified' THEN 1 ELSE 0 END) AS qualified,
+            SUM(CASE WHEN lead_status = 'Converted' THEN 1 ELSE 0 END) AS converted,
+            SUM(CASE WHEN lead_status = 'Disqualified' THEN 1 ELSE 0 END) AS disqualified
+        FROM leads
+        GROUP BY COALESCE(NULLIF(campaign, ''), NULLIF(source, ''), 'Unknown')
+        ORDER BY total_leads DESC
+        """
+    ).fetchall()
+
+    country_pipeline = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(organizations.country, ''), NULLIF(leads.country, ''), 'Unknown') AS country,
+            COUNT(leads.id) AS leads,
+            COUNT(DISTINCT contacts.id) AS contacts,
+            COUNT(DISTINCT CASE WHEN contacts.relationship_status IN ('Warm', 'Active') THEN contacts.id END) AS warm,
+            COUNT(DISTINCT CASE WHEN organizations.customer_status = 'Customer' THEN organizations.id END) AS customers
+        FROM leads
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        GROUP BY COALESCE(NULLIF(organizations.country, ''), NULLIF(leads.country, ''), 'Unknown')
+        ORDER BY leads DESC
+        """
+    ).fetchall()
+
+    china_priority_rows = conn.execute(
+        """
+        SELECT
+            leads.id AS lead_id,
+            COALESCE(contacts.name, contacts.contact_person, contacts.full_name, leads.contact_person, '') AS contact_name,
+            COALESCE(organizations.name, leads.company_name, '') AS organization_name,
+            COALESCE(organizations.city, leads.city, '') AS city,
+            COALESCE(organizations.membership, leads.membership, '') AS membership,
+            COALESCE(contacts.relationship_status, '') AS relationship_status,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(leads.priority_score, 0) AS priority_score
+        FROM leads
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        WHERE LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = 'china'
+            AND COALESCE(leads.lead_status, 'New') <> 'Disqualified'
+        ORDER BY COALESCE(leads.priority_score, 0) DESC,
+            leads.next_action_date ASC,
+            leads.id ASC
+        LIMIT 20
+        """
+    ).fetchall()
+
+    conn.close()
+    queue_rows = get_crm_follow_up_rows()
+    today_actions = [row for row in queue_rows if row["due_bucket"] in ["Overdue", "Today"]][:capacity]
+    return {
+        "kpis": dict(kpis),
+        "daily_outreach_capacity": capacity,
+        "outreach_queue": {
+            "today": min(int(row_value(outreach, "today_count", 0) or 0), capacity),
+            "this_week": min(int(row_value(outreach, "week_count", 0) or 0), capacity * 7),
+            "next_30_days": int(row_value(outreach, "month_count", 0) or 0),
+        },
+        "today_action_list": today_actions,
+        "china_priority_leads": [dict(row) for row in china_priority_rows],
+        "today_followups": [row for row in queue_rows if row["due_bucket"] == "Today"][:10],
+        "overdue_followups": [row for row in queue_rows if row["due_bucket"] == "Overdue"][:10],
+        "warm_relationships": [
+            row for row in queue_rows
+            if row["relationship_status"] in ["Warm", "Active"]
+        ][:10],
+        "new_leads_first_touch": [
+            row for row in queue_rows
+            if row["lead_status"] == "New" and not row["last_contacted_at"]
+        ][:10],
+        "campaign_progress": [dict(row) for row in campaign_progress],
+        "country_pipeline": [dict(row) for row in country_pipeline],
     }
 
 
@@ -1471,6 +2194,10 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
                 province = ?,
                 city = ?,
                 website = ?,
+                founding_date = ?,
+                anniversary_date = ?,
+                preferred_language = ?,
+                relationship_tone = ?,
                 membership = ?,
                 customer_status = ?,
                 notes = ?,
@@ -1485,11 +2212,23 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
                 organization_data.get("province"),
                 organization_data.get("city"),
                 organization_data.get("website"),
+                organization_data.get("founding_date"),
+                organization_data.get("anniversary_date"),
+                organization_data.get("preferred_language"),
+                organization_data.get("relationship_tone"),
                 organization_data.get("membership"),
                 organization_data.get("customer_status"),
                 organization_data.get("notes"),
                 lead["organization_id"],
             ),
+        )
+        log_crm_activity(
+            cur,
+            "Organization Update",
+            "Organization details edited",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
         )
 
     if lead["contact_id"] and contact_data:
@@ -1506,6 +2245,10 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
                 phone = ?,
                 wechat = ?,
                 whatsapp = ?,
+                birthday = ?,
+                preferred_language = ?,
+                preferred_channel = ?,
+                relationship_tone = ?,
                 relationship_status = ?,
                 last_contacted_at = ?,
                 next_follow_up_at = ?,
@@ -1523,12 +2266,24 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
                 contact_data.get("phone"),
                 contact_data.get("wechat"),
                 contact_data.get("whatsapp"),
+                contact_data.get("birthday"),
+                contact_data.get("preferred_language"),
+                contact_data.get("preferred_channel"),
+                contact_data.get("relationship_tone"),
                 contact_data.get("relationship_status"),
                 contact_data.get("last_contacted_at"),
                 contact_data.get("next_follow_up_at"),
                 contact_data.get("notes"),
                 lead["contact_id"],
             ),
+        )
+        log_crm_activity(
+            cur,
+            "Contact Update",
+            "Contact details edited",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
         )
 
     cur.execute(
@@ -1557,6 +2312,14 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
             lead_id,
         ),
     )
+    log_crm_activity(
+        cur,
+        "Status Change",
+        "Lead details edited",
+        lead_id=lead_id,
+        organization_id=lead["organization_id"],
+        contact_id=lead["contact_id"],
+    )
 
     conn.commit()
     conn.close()
@@ -1584,10 +2347,14 @@ def update_lead_status_action(lead_id, action):
         cur.execute(
             """
             UPDATE leads
-            SET lead_status = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            SET lead_status = ?,
+                status = ?,
+                next_action = ?,
+                next_action_date = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            ("Contacted", "Contacted", lead_id),
+            ("Contacted", "Contacted", "Follow up after intro", days_from_today(7), lead_id),
         )
         if lead["contact_id"]:
             cur.execute(
@@ -1599,14 +2366,32 @@ def update_lead_status_action(lead_id, action):
                 """,
                 (lead["contact_id"],),
             )
+        log_crm_activity(
+            cur,
+            "Status Change",
+            "Lead marked Contacted",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
+        )
     elif action == "Replied":
         cur.execute(
             """
             UPDATE leads
-            SET lead_status = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            SET lead_status = ?,
+                status = ?,
+                next_action = ?,
+                next_action_date = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            ("Replied", "Replied", lead_id),
+            (
+                "Replied",
+                "Replied",
+                "Continue conversation / ask for Vietnam shipments",
+                days_from_today(14),
+                lead_id,
+            ),
         )
         if lead["contact_id"]:
             cur.execute(
@@ -1619,14 +2404,26 @@ def update_lead_status_action(lead_id, action):
                 """,
                 ("Warm", lead["contact_id"]),
             )
+        log_crm_activity(
+            cur,
+            "Status Change",
+            "Lead marked Replied and relationship warmed",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
+        )
     elif action == "Qualified":
         cur.execute(
             """
             UPDATE leads
-            SET lead_status = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            SET lead_status = ?,
+                status = ?,
+                next_action = ?,
+                next_action_date = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            ("Qualified", "Qualified", lead_id),
+            ("Qualified", "Qualified", "Ask for current shipment inquiry", days_from_today(14), lead_id),
         )
         if lead["organization_id"]:
             cur.execute(
@@ -1646,14 +2443,26 @@ def update_lead_status_action(lead_id, action):
                 """,
                 ("Warm", lead["contact_id"]),
             )
+        log_crm_activity(
+            cur,
+            "Status Change",
+            "Lead qualified",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
+        )
     elif action == "Converted":
         cur.execute(
             """
             UPDATE leads
-            SET lead_status = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            SET lead_status = ?,
+                status = ?,
+                next_action = ?,
+                next_action_date = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            ("Converted", "Converted", lead_id),
+            ("Converted", "Converted", "Relationship Maintenance", days_from_today(30), lead_id),
         )
         if lead["organization_id"]:
             cur.execute(
@@ -1673,14 +2482,34 @@ def update_lead_status_action(lead_id, action):
                 """,
                 ("Active", lead["contact_id"]),
             )
+        log_crm_activity(
+            cur,
+            "Status Change",
+            "Lead converted to customer",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
+        )
     elif action == "Disqualified":
         cur.execute(
             """
             UPDATE leads
-            SET lead_status = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            SET lead_status = ?,
+                status = ?,
+                next_action = '',
+                next_action_date = '',
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             ("Disqualified", "Disqualified", lead_id),
+        )
+        log_crm_activity(
+            cur,
+            "Status Change",
+            "Lead disqualified",
+            lead_id=lead_id,
+            organization_id=lead["organization_id"],
+            contact_id=lead["contact_id"],
         )
     else:
         conn.close()
@@ -1695,6 +2524,17 @@ def update_contact_relationship_action(contact_id, relationship_status):
     conn = get_connection()
     cur = conn.cursor()
 
+    lead = cur.execute(
+        """
+        SELECT id, organization_id
+        FROM leads
+        WHERE contact_id = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (contact_id,),
+    ).fetchone()
+
     cur.execute(
         """
         UPDATE contacts
@@ -1703,6 +2543,29 @@ def update_contact_relationship_action(contact_id, relationship_status):
         WHERE id = ?
         """,
         (relationship_status, contact_id),
+    )
+
+    if lead:
+        next_action = next_action_for_state(None, relationship_status)
+        next_days = 30 if relationship_status == "Active" else 14
+        cur.execute(
+            """
+            UPDATE leads
+            SET next_action = ?,
+                next_action_date = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (next_action, days_from_today(next_days), lead["id"]),
+        )
+
+    log_crm_activity(
+        cur,
+        "Status Change",
+        f"Relationship status changed to {relationship_status}",
+        lead_id=row_value(lead, "id", None),
+        organization_id=row_value(lead, "organization_id", None),
+        contact_id=contact_id,
     )
 
     updated = cur.rowcount > 0
@@ -1715,6 +2578,17 @@ def update_organization_customer_action(organization_id, customer_status):
     conn = get_connection()
     cur = conn.cursor()
 
+    lead = cur.execute(
+        """
+        SELECT id, contact_id
+        FROM leads
+        WHERE organization_id = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (organization_id,),
+    ).fetchone()
+
     cur.execute(
         """
         UPDATE organizations
@@ -1723,6 +2597,15 @@ def update_organization_customer_action(organization_id, customer_status):
         WHERE id = ?
         """,
         (customer_status, organization_id),
+    )
+
+    log_crm_activity(
+        cur,
+        "Status Change",
+        f"Customer status changed to {customer_status}",
+        lead_id=row_value(lead, "id", None),
+        organization_id=organization_id,
+        contact_id=row_value(lead, "contact_id", None),
     )
 
     updated = cur.rowcount > 0
@@ -1770,9 +2653,747 @@ def update_lead_next_follow_up(lead_id, next_action, next_action_date):
             (next_action_date, lead["contact_id"]),
         )
 
+    log_crm_activity(
+        cur,
+        "Follow-up",
+        f"Next follow-up updated: {next_action or 'No action'}"
+        + (f" on {next_action_date}" if next_action_date else ""),
+        lead_id=lead_id,
+        contact_id=lead["contact_id"],
+    )
+
     conn.commit()
     conn.close()
     return True
+
+
+def snooze_follow_up(lead_id, days, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    next_date = days_from_today(days)
+
+    lead = cur.execute(
+        """
+        SELECT organization_id, contact_id
+        FROM leads
+        WHERE id = ?
+        """,
+        (lead_id,),
+    ).fetchone()
+
+    if not lead:
+        conn.close()
+        return False
+
+    cur.execute(
+        """
+        UPDATE leads
+        SET next_action_date = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (next_date, lead_id),
+    )
+
+    if lead["contact_id"]:
+        cur.execute(
+            """
+            UPDATE contacts
+            SET next_follow_up_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (next_date, lead["contact_id"]),
+        )
+
+    log_crm_activity(
+        cur,
+        "Follow-up",
+        f"Follow-up snoozed {days} days",
+        lead_id=lead_id,
+        organization_id=lead["organization_id"],
+        contact_id=lead["contact_id"],
+        user=user,
+    )
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def complete_follow_up(lead_id, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    lead = cur.execute(
+        """
+        SELECT
+            leads.organization_id,
+            leads.contact_id,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(contacts.relationship_status, '') AS relationship_status
+        FROM leads
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        WHERE id = ?
+        """,
+        (lead_id,),
+    ).fetchone()
+
+    if not lead:
+        conn.close()
+        return False
+
+    next_status = lead["lead_status"]
+    relationship_status = lead["relationship_status"]
+    next_days = 14
+
+    if lead["lead_status"] == "New":
+        next_status = "Contacted"
+        next_action = "Follow-up"
+        next_days = 7
+        if lead["contact_id"]:
+            cur.execute(
+                """
+                UPDATE contacts
+                SET last_contacted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (lead["contact_id"],),
+            )
+    elif relationship_status == "Active" or lead["lead_status"] == "Converted":
+        next_action = "Relationship Maintenance"
+        next_days = 30
+    elif relationship_status == "Warm":
+        next_action = "Relationship Nurturing"
+        next_days = 14
+    elif lead["lead_status"] == "Contacted":
+        next_action = "Follow-up"
+        next_days = 7
+    else:
+        next_action = next_action_for_state(lead["lead_status"], relationship_status)
+
+    next_date = days_from_today(next_days)
+
+    cur.execute(
+        """
+        UPDATE leads
+        SET lead_status = ?,
+            status = ?,
+            next_action = ?,
+            next_action_date = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (next_status, next_status, next_action, next_date, lead_id),
+    )
+
+    if lead["contact_id"]:
+        cur.execute(
+            """
+            UPDATE contacts
+            SET next_follow_up_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (next_date, lead["contact_id"]),
+        )
+
+    log_crm_activity(
+        cur,
+        "Follow-up",
+        f"Follow-up completed. Next: {next_action} on {next_date}",
+        lead_id=lead_id,
+        organization_id=lead["organization_id"],
+        contact_id=lead["contact_id"],
+        user=user,
+    )
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def update_lead_notes(lead_id, notes, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    lead = cur.execute(
+        """
+        SELECT organization_id, contact_id
+        FROM leads
+        WHERE id = ?
+        """,
+        (lead_id,),
+    ).fetchone()
+
+    if not lead:
+        conn.close()
+        return False
+
+    cur.execute(
+        """
+        UPDATE leads
+        SET notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (notes, lead_id),
+    )
+
+    log_crm_activity(
+        cur,
+        "Note",
+        "Manual note added",
+        lead_id=lead_id,
+        organization_id=lead["organization_id"],
+        contact_id=lead["contact_id"],
+        user=user,
+    )
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def occasion_display_date(occasion_date, is_recurring):
+    if not occasion_date:
+        return None
+    try:
+        base_date = date.fromisoformat(str(occasion_date)[:10])
+    except ValueError:
+        return None
+    if not is_recurring:
+        return base_date
+
+    current_year_date = base_date.replace(year=date.today().year)
+    if current_year_date < date.today():
+        return current_year_date.replace(year=date.today().year + 1)
+    return current_year_date
+
+
+def draft_relationship_message(row):
+    contact_name = clean_value(row.get("contact_name"))
+    organization_name = clean_value(row.get("organization_name"))
+    occasion_name = clean_value(row.get("occasion_name"))
+    language = clean_value(row.get("preferred_language")) or "English"
+    tone = clean_value(row.get("message_tone")) or clean_value(row.get("relationship_tone")) or "Warm"
+
+    if language == "Chinese":
+        if contact_name:
+            return (
+                f"{contact_name}，祝您和团队{occasion_name}快乐，身体健康，事业顺利。"
+                "期待我们保持联系，未来有更多合作机会。"
+            )
+        return (
+            f"祝{organization_name or '贵司'}团队{occasion_name}快乐，身体健康，事业顺利。"
+            "期待我们保持联系，未来有更多合作机会。"
+        )
+
+    if language == "Vietnamese":
+        recipient = f"anh/chị {contact_name}" if contact_name else f"đội ngũ {organization_name or 'quý công ty'}"
+        return (
+            f"Chúc {recipient} và đội ngũ {occasion_name} nhiều sức khỏe, may mắn và thành công. "
+            "Rất mong tiếp tục giữ liên lạc và có thêm cơ hội hợp tác trong thời gian tới."
+        )
+
+    if contact_name:
+        greeting = f"Hi {contact_name},"
+    else:
+        greeting = f"Hi {organization_name or 'team'},"
+
+    if tone == "Short":
+        return f"{greeting} wishing you and your team a wonderful {occasion_name}. Hope all is well."
+    if tone == "Formal":
+        return (
+            f"{greeting} wishing you and your team a wonderful {occasion_name}. "
+            "May this occasion bring good health, happiness, and continued success."
+        )
+    return (
+        f"{greeting} wishing you and your team a wonderful {occasion_name}. "
+        "Hope this season brings good health, happiness, and continued success. "
+        "Looking forward to staying in touch."
+    )
+
+
+def create_relationship_occasion(record):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO relationship_occasions (
+            organization_id,
+            contact_id,
+            occasion_type,
+            occasion_name,
+            occasion_date,
+            country,
+            is_recurring,
+            recurrence_rule,
+            preferred_channel,
+            preferred_language,
+            message_tone,
+            reminder_days_before,
+            status,
+            notes,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (
+            record.get("organization_id"),
+            record.get("contact_id"),
+            record.get("occasion_type"),
+            record.get("occasion_name"),
+            record.get("occasion_date"),
+            record.get("country"),
+            1 if record.get("is_recurring", True) else 0,
+            record.get("recurrence_rule") or "yearly_mm_dd",
+            record.get("preferred_channel"),
+            record.get("preferred_language"),
+            record.get("message_tone"),
+            record.get("reminder_days_before", 7),
+            record.get("status") or "Active",
+            record.get("notes"),
+        ),
+    )
+    occasion_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return occasion_id
+
+
+def add_country_holiday_reminders(organization_id, contact_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    organization = cur.execute(
+        """
+        SELECT *
+        FROM organizations
+        WHERE id = ?
+        """,
+        (organization_id,),
+    ).fetchone()
+    if not organization or not organization["country"]:
+        conn.close()
+        return 0
+
+    holidays = cur.execute(
+        """
+        SELECT *
+        FROM holiday_library
+        WHERE LOWER(TRIM(country)) = LOWER(TRIM(?))
+        """,
+        (organization["country"],),
+    ).fetchall()
+
+    created = 0
+    for holiday in holidays:
+        exists = cur.execute(
+            """
+            SELECT id
+            FROM relationship_occasions
+            WHERE organization_id = ?
+                AND COALESCE(contact_id, 0) = COALESCE(?, 0)
+                AND occasion_name = ?
+            LIMIT 1
+            """,
+            (organization_id, contact_id, holiday["holiday_name"]),
+        ).fetchone()
+        if exists:
+            continue
+        cur.execute(
+            """
+            INSERT INTO relationship_occasions (
+                organization_id,
+                contact_id,
+                occasion_type,
+                occasion_name,
+                occasion_date,
+                country,
+                is_recurring,
+                recurrence_rule,
+                preferred_channel,
+                preferred_language,
+                message_tone,
+                reminder_days_before,
+                status,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                organization_id,
+                contact_id,
+                "National Holiday",
+                holiday["holiday_name"],
+                holiday["holiday_date"],
+                holiday["country"],
+                holiday["is_recurring"],
+                holiday["recurrence_rule"],
+                None,
+                organization["preferred_language"] or "English",
+                organization["relationship_tone"] or "Warm",
+                7,
+                "Active",
+                holiday["default_message_theme"],
+            ),
+        )
+        created += 1
+
+    conn.commit()
+    conn.close()
+    return created
+
+
+def sync_date_based_occasions(organization_id=None, contact_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    created = 0
+
+    if contact_id:
+        contact = cur.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+        if contact and contact["birthday"]:
+            exists = cur.execute(
+                """
+                SELECT id FROM relationship_occasions
+                WHERE contact_id = ? AND occasion_type = ? LIMIT 1
+                """,
+                (contact_id, "Birthday"),
+            ).fetchone()
+            if not exists:
+                cur.execute(
+                    """
+                    INSERT INTO relationship_occasions (
+                        organization_id, contact_id, occasion_type, occasion_name,
+                        occasion_date, country, is_recurring, recurrence_rule,
+                        preferred_channel, preferred_language, message_tone,
+                        reminder_days_before, status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        contact["organization_id"],
+                        contact_id,
+                        "Birthday",
+                        "Birthday",
+                        contact["birthday"],
+                        None,
+                        1,
+                        "yearly_mm_dd",
+                        contact["preferred_channel"],
+                        contact["preferred_language"] or "English",
+                        contact["relationship_tone"] or "Warm",
+                        7,
+                        "Active",
+                    ),
+                )
+                created += 1
+
+    if organization_id:
+        organization = cur.execute("SELECT * FROM organizations WHERE id = ?", (organization_id,)).fetchone()
+        for field, occasion_type, occasion_name in [
+            ("founding_date", "Company Anniversary", "Company Anniversary"),
+            ("anniversary_date", "Cooperation Anniversary", "Cooperation Anniversary"),
+        ]:
+            if not organization or not organization[field]:
+                continue
+            exists = cur.execute(
+                """
+                SELECT id FROM relationship_occasions
+                WHERE organization_id = ? AND occasion_type = ? LIMIT 1
+                """,
+                (organization_id, occasion_type),
+            ).fetchone()
+            if exists:
+                continue
+            cur.execute(
+                """
+                INSERT INTO relationship_occasions (
+                    organization_id, occasion_type, occasion_name, occasion_date,
+                    country, is_recurring, recurrence_rule, preferred_language,
+                    message_tone, reminder_days_before, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    organization_id,
+                    occasion_type,
+                    occasion_name,
+                    organization[field],
+                    organization["country"],
+                    1,
+                    "yearly_mm_dd",
+                    organization["preferred_language"] or "English",
+                    organization["relationship_tone"] or "Warm",
+                    14,
+                    "Active",
+                ),
+            )
+            created += 1
+
+    conn.commit()
+    conn.close()
+    return created
+
+
+def get_occasion_reminders():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            relationship_occasions.*,
+            organizations.name AS organization_name,
+            organizations.country AS organization_country,
+            organizations.relationship_tone AS organization_tone,
+            contacts.name AS contact_name,
+            contacts.relationship_status,
+            contacts.notes AS contact_notes,
+            contacts.preferred_language AS contact_language,
+            contacts.preferred_channel AS contact_channel,
+            contacts.relationship_tone AS contact_tone,
+            leads.id AS lead_id
+        FROM relationship_occasions
+        LEFT JOIN organizations ON organizations.id = relationship_occasions.organization_id
+        LEFT JOIN contacts ON contacts.id = relationship_occasions.contact_id
+        LEFT JOIN leads ON leads.contact_id = relationship_occasions.contact_id
+            OR (
+                relationship_occasions.contact_id IS NULL
+                AND leads.organization_id = relationship_occasions.organization_id
+            )
+        WHERE relationship_occasions.status = 'Active'
+        GROUP BY relationship_occasions.id
+        """
+    ).fetchall()
+    conn.close()
+
+    reminders = []
+    today = date.today()
+    for row in rows:
+        item = dict(row)
+        display_date = occasion_display_date(item["occasion_date"], item["is_recurring"])
+        if not display_date:
+            continue
+        reminder_start = display_date - timedelta(days=item["reminder_days_before"] or 0)
+        if today < reminder_start:
+            continue
+        if display_date < today:
+            bucket = "Overdue"
+        elif display_date == today:
+            bucket = "Today"
+        elif display_date <= today + timedelta(days=7):
+            bucket = "Next 7 days"
+        elif display_date <= today + timedelta(days=30):
+            bucket = "Next 30 days"
+        else:
+            continue
+
+        item["display_date"] = display_date.isoformat()
+        item["bucket"] = bucket
+        item["preferred_language"] = item["preferred_language"] or item["contact_language"] or "English"
+        item["preferred_channel"] = item["preferred_channel"] or item["contact_channel"] or "WeChat"
+        item["message_tone"] = item["message_tone"] or item["contact_tone"] or item["organization_tone"] or "Warm"
+        item["country"] = item["country"] or item["organization_country"] or ""
+        item["suggested_message"] = draft_relationship_message(item)
+        reminders.append(item)
+
+    return sorted(reminders, key=lambda item: (item["display_date"], item["id"]))
+
+
+def mark_occasion_message_sent(occasion_id, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    occasion = cur.execute(
+        "SELECT * FROM relationship_occasions WHERE id = ?",
+        (occasion_id,),
+    ).fetchone()
+    if not occasion:
+        conn.close()
+        return False
+
+    lead = cur.execute(
+        """
+        SELECT id FROM leads
+        WHERE (contact_id = ? AND ? IS NOT NULL)
+            OR (organization_id = ? AND ? IS NOT NULL)
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (occasion["contact_id"], occasion["contact_id"], occasion["organization_id"], occasion["organization_id"]),
+    ).fetchone()
+
+    if occasion["contact_id"]:
+        cur.execute(
+            """
+            UPDATE contacts
+            SET last_contacted_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (today_iso(), occasion["contact_id"]),
+        )
+
+    log_crm_activity(
+        cur,
+        "Occasion Message Sent",
+        f"Sent {occasion['occasion_name']} greeting via {occasion['preferred_channel'] or 'manual channel'}",
+        lead_id=row_value(lead, "id", None),
+        organization_id=occasion["organization_id"],
+        contact_id=occasion["contact_id"],
+        user=user,
+    )
+
+    if not occasion["is_recurring"]:
+        cur.execute(
+            """
+            UPDATE relationship_occasions
+            SET status = 'Completed',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (occasion_id,),
+        )
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def snooze_occasion(occasion_id, days=7):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE relationship_occasions
+        SET occasion_date = ?,
+            is_recurring = 0,
+            recurrence_rule = 'snoozed_once',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (days_from_today(days), occasion_id),
+    )
+    updated = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def update_relationship_occasion(occasion_id, record):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE relationship_occasions
+        SET occasion_type = ?,
+            occasion_name = ?,
+            occasion_date = ?,
+            country = ?,
+            is_recurring = ?,
+            recurrence_rule = ?,
+            preferred_channel = ?,
+            preferred_language = ?,
+            message_tone = ?,
+            reminder_days_before = ?,
+            status = ?,
+            notes = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            record.get("occasion_type"),
+            record.get("occasion_name"),
+            record.get("occasion_date"),
+            record.get("country"),
+            1 if record.get("is_recurring") else 0,
+            record.get("recurrence_rule"),
+            record.get("preferred_channel"),
+            record.get("preferred_language"),
+            record.get("message_tone"),
+            record.get("reminder_days_before"),
+            record.get("status"),
+            record.get("notes"),
+            occasion_id,
+        ),
+    )
+    updated = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+
+def get_holiday_library():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM holiday_library
+        ORDER BY country, holiday_name
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_holiday_library_item(record, holiday_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    if holiday_id:
+        cur.execute(
+            """
+            UPDATE holiday_library
+            SET country = ?,
+                holiday_name = ?,
+                holiday_date = ?,
+                is_recurring = ?,
+                recurrence_rule = ?,
+                default_message_theme = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                record.get("country"),
+                record.get("holiday_name"),
+                record.get("holiday_date"),
+                1 if record.get("is_recurring") else 0,
+                record.get("recurrence_rule"),
+                record.get("default_message_theme"),
+                holiday_id,
+            ),
+        )
+        saved_id = holiday_id
+    else:
+        cur.execute(
+            """
+            INSERT INTO holiday_library (
+                country,
+                holiday_name,
+                holiday_date,
+                is_recurring,
+                recurrence_rule,
+                default_message_theme,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                record.get("country"),
+                record.get("holiday_name"),
+                record.get("holiday_date"),
+                1 if record.get("is_recurring", True) else 0,
+                record.get("recurrence_rule") or "yearly_mm_dd",
+                record.get("default_message_theme"),
+            ),
+        )
+        saved_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+    return saved_id
 
 
 def convert_lead_to_contact(lead_id):
@@ -2044,8 +3665,26 @@ def save_captured_crm_record(record, save_as="Lead", duplicate_action="Update ex
                 lead_id,
             ),
         )
+        log_crm_activity(
+            cur,
+            "Status Change",
+            f"Existing lead updated as {save_as}",
+            lead_id=lead_id,
+            organization_id=organization_id,
+            contact_id=contact_id,
+            user=record.get("owner") or "admin",
+        )
     elif organization_id or contact_id:
         lead_id = insert_lead(cur, organization_id, contact_id, record)
+        log_crm_activity(
+            cur,
+            "Import",
+            f"Lead captured as {save_as}",
+            lead_id=lead_id,
+            organization_id=organization_id,
+            contact_id=contact_id,
+            user=record.get("owner") or "admin",
+        )
 
     conn.commit()
     conn.close()
