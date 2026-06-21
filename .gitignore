@@ -1,9 +1,13 @@
 __pycache__/
 *.pyc
 
+.venv/
+venv/
+
+backups/
+
+.env
+
 .streamlit/
 
-data/*.db-shm
-data/*.db-wal
-
-.vscode/
+*.log
