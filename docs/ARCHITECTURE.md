@@ -24,6 +24,9 @@ Core CRM tables:
 - `holiday_library`
 - `outreach_campaigns`
 - `outreach_messages`
+- `outreach_campaign_templates`
+- `processed_bounce_messages`
+- `backup_history`
 
 Customer is represented by `organizations.customer_status`. There is no separate customers table.
 
@@ -33,11 +36,34 @@ Organizations include company identity, geography, membership, website, customer
 
 Contacts include person identity, communication channels, relationship status, birthday, preferred channel/language, last contacted date, and next follow-up date.
 
+Contacts also include `email_status` for delivery hygiene:
+
+- Valid
+- Invalid
+- Bounced
+- Unknown
+
 Leads include organization/contact links, source/campaign, lead status, priority score, action score, next action, and next action date.
 
 Opportunities include opportunity name, organization/contact links, owner, stage, trade lane, service type, potential revenue, potential profit, expected close date, next action, next action date, and notes.
 
 Outreach campaigns store campaign metadata in `outreach_campaigns` and per-contact message records in `outreach_messages`.
+
+`outreach_messages.delivery_status` tracks message delivery state:
+
+- Sent
+- Failed
+- Bounced
+- Delivered
+- Replied
+- Unknown
+
+Reusable campaign templates are stored in `outreach_campaign_templates`:
+
+- `template_name`
+- `campaign_name`
+- `subject_template`
+- `instructions`
 
 Opportunity pipeline stages:
 
@@ -97,15 +123,77 @@ Follow-up Queue remains the broader operational list with filters and quick acti
 The Outreach Campaigns page supports:
 
 - Audience filtering by country, membership, lead status, and relationship status
+- Preview First 5 before full campaign generation
 - Rule-based message draft generation
+- Campaign Instructions for rule-based regeneration
+- Global campaign subject templates with contact and organization tokens
+- Default short subject templates
+- Campaign instruction presets
+- Global find/replace across current drafts
+- Send Preview To Myself without CRM state updates
+- Rule-based quality checks for message review
+- Include/exclude recipient checkboxes
 - Per-message review and editing before send
-- Manual approval via `Approve & Send`
+- Campaign summary and required approval checkbox before final send
+- Manual approval via `Final Approve & Send`
+- Campaign result display after send with sent, failed, skipped, failed-recipient view, and Follow-up Queue navigation
+- Reusable campaign templates
+- Central email signature appended to generated messages
 - SMTP delivery using settings stored in `app_settings`
 - SMTP test email from Admin using the same saved settings
+- SMTP connection test from Admin without sending email
 - CRM updates after successful send
 - Campaign metrics
 
-SMTP settings are stored in `app_settings`.
+SMTP settings and email signature settings are stored in `app_settings`.
+
+Email signature setting keys:
+
+- `signature_name`
+- `signature_title`
+- `signature_company`
+- `signature_phone`
+- `signature_email`
+- `signature_website`
+- `signature_wechat`
+- `signature_whatsapp`
+- `signature_html`
+
+SMTP encryption modes:
+
+- SSL: `smtplib.SMTP_SSL(host, port)`
+- TLS: `smtplib.SMTP(host, port)` followed by `starttls()`
+- None: `smtplib.SMTP(host, port)`
+
+## Email Bounce Processing
+
+Admin includes Email Bounce Processing.
+
+V1 reads bounce messages by IMAP using:
+
+- Host: `mail.1aimlogistics.com`
+- Port: `993`
+- Encryption: SSL
+- Username/password: saved SMTP username and password
+
+Bounce processing:
+
+- Searches bounce-like subjects.
+- Parses bounced recipient emails from `Final-Recipient`, `Original-Recipient`, `RCPT TO`, `Recipient`, or visible email addresses.
+- Classifies hard and soft bounces with rule-based text checks.
+- Updates hard-bounced contacts to `email_status = Bounced`.
+- Logs bounce activities.
+- Updates matching outreach message delivery status.
+- Stores processed messages in `processed_bounce_messages`.
+- Does not delete mailbox messages in V1.
+
+Admin also includes Invalid / Bounced Email Cleanup.
+
+The cleanup view queries contacts with `email_status IN ('Bounced', 'Invalid')`, shows company and lead context, and supports:
+
+- saving a corrected email as Valid
+- marking email Valid, Invalid, or Bounced
+- opening the related Lead Detail page
 
 ## Git Health Monitor
 
@@ -123,6 +211,19 @@ It displays:
 - Error and suggested fix when Git reports a problem
 
 The Backup Now button runs `scripts/git_backup.py` and displays the script output inside the Admin page.
+
+Git backup history is stored in `backup_history`.
+
+Auto backup uses `app_settings`:
+
+- `git_auto_backup_every`
+- `git_last_auto_backup_at`
+- `git_backup_running`
+
+The Git backup script creates an application-level lock file and cleans stale Git lock files older than 5 minutes:
+
+- `.git/index.lock`
+- `.git/packed-refs.lock`
 
 ## Opportunities
 

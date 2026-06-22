@@ -3,6 +3,7 @@ import importlib
 import re
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -18,23 +19,32 @@ from database import (
     create_inquiry,
     find_captured_crm_duplicates,
     get_app_setting,
+    get_backup_history,
     get_database_backup_status,
     get_existing_lead_keys,
     get_lead_detail,
+    get_last_successful_backup,
     get_leads,
     get_crm_dashboard_data,
     get_crm_follow_up_rows,
     get_daily_outreach_capacity,
     get_holiday_library,
+    get_invalid_email_contacts,
     get_opportunities,
     get_opportunity_dashboard_data,
     get_opportunity_detail,
     get_open_tasks,
     get_outreach_campaign_metrics,
+    get_outreach_campaign_templates,
+    process_email_bounces,
     get_campaign_audience,
     get_campaign_filter_options,
+    get_campaign_invalid_email_skip_count,
     generate_outreach_message,
     generate_outreach_subject,
+    render_subject_template,
+    save_outreach_campaign_template,
+    send_outreach_preview_email,
     get_task_counts_by_type,
     import_leads,
     initialize_missing_lead_followups,
@@ -47,6 +57,7 @@ from database import (
     has_captured_crm_duplicates,
     is_smtp_configured,
     send_email_via_smtp,
+    test_smtp_connection,
     set_app_setting,
     complete_follow_up,
     add_country_holiday_reminders,
@@ -54,10 +65,13 @@ from database import (
     snooze_follow_up,
     get_occasion_reminders,
     mark_occasion_message_sent,
+    record_backup_history,
     snooze_occasion,
     sync_date_based_occasions,
     refresh_lead_priority_scores,
     update_relationship_occasion,
+    update_contact_email_status,
+    update_contact_email_address,
     update_contact_relationship_action,
     update_lead_detail,
     update_lead_next_follow_up,
@@ -103,6 +117,7 @@ ORG_TYPE_OPTIONS = [
 CUSTOMER_STATUS_OPTIONS = ["Prospect", "Qualified", "Customer", "Inactive"]
 RELATIONSHIP_STATUS_OPTIONS = ["New", "Connected", "Introduced", "Warm", "Active", "Inactive"]
 LEAD_STATUS_OPTIONS = ["New", "Contacted", "Replied", "Qualified", "Disqualified", "Converted"]
+EMAIL_STATUS_OPTIONS = ["Unknown", "Valid", "Invalid", "Bounced"]
 CAPTURE_SAVE_AS_OPTIONS = [
     "Lead",
     "Customer",
@@ -857,6 +872,7 @@ def show_dashboard():
     data = get_crm_dashboard_data()
     kpis = data["kpis"]
     outreach_queue = data["outreach_queue"]
+    last_backup = get_last_successful_backup()
 
     def priority_color(score):
         if score >= 90:
@@ -920,6 +936,12 @@ def show_dashboard():
     priority_cols[3].metric("High Priority Contacts", int(kpis.get("high_priority_contacts") or 0))
     priority_cols[4].metric("China Leads", int(kpis.get("china_leads") or 0))
     priority_cols[5].metric("China Warm Relationships", int(kpis.get("china_warm_relationships") or 0))
+
+    st.subheader("Backup Status")
+    backup_cols = st.columns(3)
+    backup_cols[0].metric("Last Backup", last_backup.get("timestamp", "No successful backup") if last_backup else "No successful backup")
+    backup_cols[1].metric("Commit", ((last_backup.get("commit_hash", "") if last_backup else "") or "-")[:8])
+    backup_cols[2].metric("Status", "Synced" if last_backup else "No backup")
 
     intelligence_cols = st.columns(2)
     with intelligence_cols[0]:
@@ -1062,9 +1084,11 @@ def git_output(result):
 
 def detect_git_error(message, repo_path):
     lower = (message or "").lower()
-    lock_path = Path(repo_path) / ".git" / "index.lock" if repo_path else None
-    if lock_path and lock_path.exists():
-        return "Permission Error", "index.lock exists", "Close Git/Python processes or run backup_git.bat with force unlock."
+    git_dir = Path(repo_path) / ".git" if repo_path else None
+    for lock_name in ["index.lock", "packed-refs.lock"]:
+        lock_path = git_dir / lock_name if git_dir else None
+        if lock_path and lock_path.exists():
+            return "Permission Error", f"{lock_name} exists", "Close Git/Python processes or run backup_git.bat with force unlock."
     if "permission denied" in lower or "access is denied" in lower:
         return "Permission Error", message, "Run: attrib -R .git /S /D and icacls .git /grant %USERNAME%:F /T"
     if "authentication failed" in lower or "could not read username" in lower:
@@ -1185,6 +1209,108 @@ def render_git_indicator(indicator):
     )
 
 
+def parse_backup_output(output):
+    result = {
+        "branch": "",
+        "commit_hash": "",
+        "push_status": "failed",
+    }
+    for line in (output or "").splitlines():
+        clean = line.strip()
+        lower = clean.lower()
+        if lower.startswith("branch:"):
+            result["branch"] = clean.split(":", 1)[1].strip()
+        elif lower.startswith("commit hash:"):
+            result["commit_hash"] = clean.split(":", 1)[1].strip()
+        elif lower.startswith("push status:"):
+            result["push_status"] = clean.split(":", 1)[1].strip().lower()
+    return result
+
+
+def run_git_backup_now(message="Auto backup CRM progress"):
+    repo_health = get_git_health()
+    repo_path = Path(repo_health["repo_path"] or Path.cwd())
+    script_path = repo_path / "scripts" / "git_backup.py"
+    if not script_path.exists():
+        output = f"Backup script not found: {script_path}"
+        record_backup_history("", repo_health.get("branch", ""), "failed", output)
+        return 1, output
+
+    st.session_state.git_backup_running = True
+    set_app_setting("git_backup_running", "1")
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--message",
+                message,
+                "--force-unlock",
+            ],
+            cwd=repo_path,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
+            shell=False,
+        )
+        output = git_output(result) or "No output."
+        parsed = parse_backup_output(output)
+        status = "succeeded" if result.returncode == 0 and parsed["push_status"] == "succeeded" else "failed"
+        record_backup_history(
+            parsed["commit_hash"],
+            parsed["branch"] or repo_health.get("branch", ""),
+            status,
+            output,
+        )
+        if status == "succeeded":
+            set_app_setting("git_last_auto_backup_at", datetime.now().isoformat(timespec="seconds"))
+        return result.returncode, output
+    except Exception as exc:
+        output = str(exc)
+        record_backup_history("", repo_health.get("branch", ""), "failed", output)
+        return 1, output
+    finally:
+        st.session_state.git_backup_running = False
+        set_app_setting("git_backup_running", "0")
+
+
+def auto_backup_interval_minutes(value):
+    return {
+        "Off": None,
+        "30 min": 30,
+        "1 hour": 60,
+        "4 hours": 240,
+    }.get(value)
+
+
+def maybe_run_auto_git_backup():
+    if st.session_state.get("git_backup_auto_checked"):
+        return
+    st.session_state.git_backup_auto_checked = True
+
+    interval_label = get_app_setting("git_auto_backup_every", "Off")
+    interval_minutes = auto_backup_interval_minutes(interval_label)
+    if not interval_minutes:
+        return
+    if get_app_setting("git_backup_running", "0") == "1":
+        return
+
+    last_run = get_app_setting("git_last_auto_backup_at", "")
+    should_run = True
+    if last_run:
+        try:
+            last_run_at = datetime.fromisoformat(last_run)
+            should_run = datetime.now() - last_run_at >= timedelta(minutes=interval_minutes)
+        except ValueError:
+            should_run = True
+
+    if should_run:
+        returncode, output = run_git_backup_now("Auto backup CRM progress")
+        st.session_state.git_backup_output = output
+        st.session_state.git_backup_returncode = returncode
+
+
 def show_admin():
     st.title("Admin")
 
@@ -1223,43 +1349,41 @@ def show_admin():
     if git_health["suggested_fix"]:
         st.info(git_health["suggested_fix"])
 
-    if st.button("Backup Now", key="admin_backup_now"):
-        script_path = Path(git_health["repo_path"] or Path.cwd()) / "scripts" / "git_backup.py"
-        if not script_path.exists():
-            st.error(f"Backup script not found: {script_path}")
-        else:
-            with st.spinner("Running Git backup..."):
-                try:
-                    result = subprocess.run(
-                        [
-                            sys.executable,
-                            str(script_path),
-                            "--message",
-                            "Auto backup CRM progress",
-                            "--force-unlock",
-                        ],
-                        cwd=git_health["repo_path"] or Path.cwd(),
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        timeout=300,
-                        shell=False,
-                    )
-                    output = git_output(result) or "No output."
-                    st.session_state.git_backup_output = output
-                    st.session_state.git_backup_returncode = result.returncode
-                    if result.returncode == 0:
-                        st.success("Git backup succeeded.")
-                    else:
-                        st.error("Git backup failed.")
-                except Exception as exc:
-                    st.session_state.git_backup_output = str(exc)
-                    st.session_state.git_backup_returncode = 1
-                    st.error(f"Git backup failed: {exc}")
+    auto_options = ["Off", "30 min", "1 hour", "4 hours"]
+    current_auto_backup = get_app_setting("git_auto_backup_every", "Off")
+    auto_cols = st.columns([1, 1, 2])
+    selected_auto_backup = auto_cols[0].selectbox(
+        "Auto Backup Every",
+        auto_options,
+        index=auto_options.index(current_auto_backup) if current_auto_backup in auto_options else 0,
+    )
+    if auto_cols[1].button("Save Auto Backup", key="save_git_auto_backup"):
+        set_app_setting("git_auto_backup_every", selected_auto_backup)
+        st.success("Auto backup setting saved.")
+        st.rerun()
+
+    backup_running = st.session_state.get("git_backup_running", False) or get_app_setting("git_backup_running", "0") == "1"
+    backup_label = "Backup Running..." if backup_running else "Backup Now"
+    if auto_cols[2].button(backup_label, key="admin_backup_now", disabled=backup_running):
+        with st.spinner("Running Git backup..."):
+            returncode, output = run_git_backup_now("Auto backup CRM progress")
+            st.session_state.git_backup_output = output
+            st.session_state.git_backup_returncode = returncode
+            if returncode == 0:
+                st.success("Git backup succeeded.")
+            else:
+                st.error("Git backup failed.")
 
     if st.session_state.get("git_backup_output"):
         st.caption("Backup output")
         st.code(st.session_state.git_backup_output)
+
+    history = get_backup_history(20)
+    st.caption("Backup History")
+    if history:
+        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+    else:
+        st.info("No backup history yet.")
 
     st.divider()
     st.subheader("System Settings")
@@ -1284,7 +1408,19 @@ def show_admin():
     smtp_password = smtp_cols[1].text_input("SMTP Password", value=get_app_setting("smtp_password", ""), type="password")
     smtp_from_email = smtp_cols[0].text_input("From Email", value=get_app_setting("smtp_from_email", ""))
     smtp_from_name = smtp_cols[1].text_input("From Name", value=get_app_setting("smtp_from_name", "1Aim"))
-    smtp_use_tls = st.checkbox("Use TLS", value=get_app_setting("smtp_use_tls", "1") == "1")
+    current_encryption = get_app_setting("smtp_encryption", "")
+    if not current_encryption:
+        current_encryption = "TLS" if get_app_setting("smtp_use_tls", "1") == "1" else "None"
+    encryption_options = ["SSL", "TLS", "None"]
+    smtp_encryption = st.selectbox(
+        "Encryption Type",
+        encryption_options,
+        index=encryption_options.index(current_encryption) if current_encryption in encryption_options else 1,
+    )
+    debug_cols = st.columns(3)
+    debug_cols[0].metric("Host", smtp_host or "-")
+    debug_cols[1].metric("Port", smtp_port or "-")
+    debug_cols[2].metric("Encryption Type", smtp_encryption)
     if st.button("Save Email Settings", key="save_smtp_settings"):
         for key, value in [
             ("smtp_host", smtp_host),
@@ -1293,11 +1429,24 @@ def show_admin():
             ("smtp_password", smtp_password),
             ("smtp_from_email", smtp_from_email),
             ("smtp_from_name", smtp_from_name),
-            ("smtp_use_tls", "1" if smtp_use_tls else "0"),
+            ("smtp_encryption", smtp_encryption),
+            ("smtp_use_tls", "1" if smtp_encryption == "TLS" else "0"),
         ]:
             set_app_setting(key, value)
         st.success("Email settings saved.")
         st.rerun()
+
+    test_connection_disabled = not bool(get_app_setting("smtp_host", ""))
+    if st.button("Test Connection", disabled=test_connection_disabled, key="test_smtp_connection"):
+        result = test_smtp_connection()
+        result_cols = st.columns(3)
+        result_cols[0].write(result["connection"])
+        result_cols[1].write(result["encryption"])
+        result_cols[2].write(result["authentication"])
+        if result["ok"]:
+            st.success("SMTP connection test passed.")
+        else:
+            st.error(result["error"])
 
     test_cols = st.columns([2, 1])
     test_email = test_cols[0].text_input("Test Email To", key="smtp_test_email")
@@ -1316,6 +1465,112 @@ def show_admin():
         st.caption("Save SMTP host and from email before sending a test email.")
     elif test_email and not is_valid_email(test_email):
         st.caption("Enter a valid test email address.")
+
+    st.divider()
+    st.subheader("Email Bounce Processing")
+    imap_cols = st.columns(4)
+    imap_cols[0].metric("IMAP Host", get_app_setting("imap_host", "mail.1aimlogistics.com"))
+    imap_cols[1].metric("IMAP Port", get_app_setting("imap_port", "993"))
+    imap_cols[2].metric("Encryption", "SSL")
+    imap_cols[3].metric("Username", get_app_setting("smtp_username", "") or "-")
+    max_bounce_messages = st.selectbox("Mailbox Scan Limit", [50, 100, 200, 500], index=1)
+    if st.button("Process Bounce Emails", key="process_bounce_emails"):
+        with st.spinner("Reading bounce emails from mailbox..."):
+            result = process_email_bounces(max_bounce_messages)
+        st.session_state.bounce_processing_result = result
+
+    bounce_result = st.session_state.get("bounce_processing_result")
+    if bounce_result:
+        bounce_cols = st.columns(5)
+        bounce_cols[0].metric("Bounce Emails Scanned", bounce_result.get("scanned", 0))
+        bounce_cols[1].metric("Hard Bounces Found", bounce_result.get("hard_bounces", 0))
+        bounce_cols[2].metric("Soft Bounces Found", bounce_result.get("soft_bounces", 0))
+        bounce_cols[3].metric("Contacts Updated", bounce_result.get("contacts_updated", 0))
+        bounce_cols[4].metric("Unmatched", len(bounce_result.get("unmatched", [])))
+        if bounce_result.get("unmatched"):
+            st.caption("Unmatched bounced emails")
+            st.dataframe(pd.DataFrame({"Email": bounce_result["unmatched"]}), use_container_width=True, hide_index=True)
+        if bounce_result.get("errors"):
+            st.error(" | ".join(bounce_result["errors"]))
+
+    st.subheader("Invalid / Bounced Email Cleanup")
+    cleanup_filters = st.columns([1, 2, 1])
+    cleanup_status = cleanup_filters[0].selectbox("Email Status Filter", ["All", "Bounced", "Invalid"], key="email_cleanup_status")
+    cleanup_search = cleanup_filters[1].text_input("Search Contact / Company / Email", key="email_cleanup_search")
+    cleanup_limit = cleanup_filters[2].selectbox("Rows", [25, 50, 100, 200], index=1, key="email_cleanup_limit")
+    bad_email_rows = get_invalid_email_contacts(cleanup_status, cleanup_search, cleanup_limit)
+    status_counts = {
+        "Bounced": sum(1 for row in bad_email_rows if row.get("email_status") == "Bounced"),
+        "Invalid": sum(1 for row in bad_email_rows if row.get("email_status") == "Invalid"),
+    }
+    cleanup_metric_cols = st.columns(3)
+    cleanup_metric_cols[0].metric("Showing", len(bad_email_rows))
+    cleanup_metric_cols[1].metric("Bounced", status_counts["Bounced"])
+    cleanup_metric_cols[2].metric("Invalid", status_counts["Invalid"])
+    if not bad_email_rows:
+        st.info("No invalid or bounced emails found for this filter.")
+    for row in bad_email_rows:
+        title = f"{row.get('contact_name') or row.get('full_name') or 'No contact'} - {row.get('email') or 'No email'}"
+        with st.expander(title):
+            meta_cols = st.columns(4)
+            meta_cols[0].write(row.get("organization_name") or "-")
+            meta_cols[1].write(row.get("country") or "-")
+            meta_cols[2].write(row.get("city") or "-")
+            meta_cols[3].write(row.get("email_status") or "Unknown")
+            corrected_email = st.text_input(
+                "Corrected Email",
+                value=row.get("email") or "",
+                key=f"cleanup_email_{row['contact_id']}",
+            )
+            action_cols = st.columns(5)
+            if action_cols[0].button("Save as Valid", key=f"cleanup_save_valid_{row['contact_id']}"):
+                if is_valid_email(corrected_email):
+                    update_contact_email_address(row["contact_id"], corrected_email.strip(), "Valid", "Email cleanup")
+                    st.success("Email corrected and marked Valid.")
+                    st.rerun()
+                else:
+                    st.error("Enter a valid email before saving.")
+            if action_cols[1].button("Mark Valid", key=f"cleanup_mark_valid_{row['contact_id']}"):
+                update_contact_email_status(row["contact_id"], "Valid", "Email cleanup")
+                st.rerun()
+            if action_cols[2].button("Mark Invalid", key=f"cleanup_mark_invalid_{row['contact_id']}"):
+                update_contact_email_status(row["contact_id"], "Invalid", "Email cleanup")
+                st.rerun()
+            if action_cols[3].button("Mark Bounced", key=f"cleanup_mark_bounced_{row['contact_id']}"):
+                update_contact_email_status(row["contact_id"], "Bounced", "Email cleanup")
+                st.rerun()
+            if action_cols[4].button("Open Lead", key=f"cleanup_open_lead_{row['contact_id']}", disabled=not row.get("lead_id")):
+                st.session_state.selected_lead_id = row["lead_id"]
+                st.session_state.pending_page = "Leads List"
+                st.rerun()
+
+    st.divider()
+    st.subheader("Email Signature")
+    sig_cols = st.columns(2)
+    signature_name = sig_cols[0].text_input("Signature Name", value=get_app_setting("signature_name", "Kien Ho"))
+    signature_title = sig_cols[1].text_input("Signature Title", value=get_app_setting("signature_title", "CEO"))
+    signature_company = sig_cols[0].text_input("Signature Company", value=get_app_setting("signature_company", "1Aim Logistics"))
+    signature_phone = sig_cols[1].text_input("Signature Phone", value=get_app_setting("signature_phone", ""))
+    signature_email = sig_cols[0].text_input("Signature Email", value=get_app_setting("signature_email", ""))
+    signature_website = sig_cols[1].text_input("Signature Website", value=get_app_setting("signature_website", ""))
+    signature_wechat = sig_cols[0].text_input("Signature WeChat", value=get_app_setting("signature_wechat", ""))
+    signature_whatsapp = sig_cols[1].text_input("Signature WhatsApp", value=get_app_setting("signature_whatsapp", ""))
+    signature_html = st.text_area("HTML Signature", value=get_app_setting("signature_html", ""), height=120)
+    if st.button("Save Email Signature", key="save_email_signature"):
+        for key, value in [
+            ("signature_name", signature_name),
+            ("signature_title", signature_title),
+            ("signature_company", signature_company),
+            ("signature_phone", signature_phone),
+            ("signature_email", signature_email),
+            ("signature_website", signature_website),
+            ("signature_wechat", signature_wechat),
+            ("signature_whatsapp", signature_whatsapp),
+            ("signature_html", signature_html),
+        ]:
+            set_app_setting(key, value)
+        st.success("Email signature saved.")
+        st.rerun()
 
     st.divider()
     st.subheader("CRM Activation")
@@ -1474,6 +1729,71 @@ def show_follow_up_queue():
             st.divider()
 
 
+OUTREACH_SUBJECT_TEMPLATES = [
+    "OLO HCM 2026, {{first_name}}",
+    "Vietnam support for {{company}}",
+    "Nice to meet you at OLO HCM",
+    "{{first_name}}, Vietnam logistics support",
+]
+
+
+OUTREACH_INSTRUCTION_PRESETS = {
+    "Friendly OLO Intro": "Use first name only. Friendly tone. Mention OLO HCM 2026. Keep under 120 words. Avoid sounding like mass marketing.",
+    "China Agent Outreach": "Use first name only. Friendly but professional tone. Focus on China forwarder cooperation with Vietnam operations and customs support. Keep under 120 words.",
+    "WCA Introduction": "Use first name only. Mention WCA network connection. Professional tone. Keep under 120 words. Ask to stay connected for Vietnam inquiries.",
+    "Follow-up No Reply": "Use first name only. Short follow-up tone. Mention that I wanted to reconnect briefly. Keep under 90 words. Avoid pressure.",
+    "Holiday Greeting": "Warm greeting tone. Do not mention sales directly. Keep under 100 words. Focus on relationship and good wishes.",
+    "Custom": "",
+}
+
+
+def evaluate_outreach_quality(draft, subject, message_body):
+    plain_body = re.sub(r"<[^>]+>", " ", message_body or "")
+    words = re.findall(r"\b\w+\b", plain_body)
+    first_name = (draft.get("contact_name") or "").split()[0] if draft.get("contact_name") else ""
+    lower_body = plain_body.lower()
+    lower_subject = (subject or "").lower()
+    spam_words = ["free", "guarantee", "urgent", "limited time", "act now", "winner", "risk-free", "100%"]
+    spam_hits = [word for word in spam_words if word in lower_body or word in lower_subject]
+    has_greeting = bool(re.search(r"\b(hi|hello|dear)\b", lower_body))
+    has_signature = "best regards" in lower_body or "1aim" in lower_body or "</" in (message_body or "")
+    uses_first_name = bool(first_name and first_name.lower() in lower_body[:120])
+
+    subject_length = len(subject or "")
+    message_length = len(words)
+    quality_issues = []
+    if subject_length > 70 or subject_length < 8:
+        quality_issues.append("Subject length")
+    if message_length > 160 or message_length < 35:
+        quality_issues.append("Message length")
+    if not has_greeting:
+        quality_issues.append("Missing greeting")
+    if not has_signature:
+        quality_issues.append("Missing signature")
+
+    spam_risk = "High" if len(spam_hits) >= 3 else "Medium" if spam_hits else "Low"
+    personalization_points = sum(
+        [
+            uses_first_name,
+            bool(draft.get("organization_name") and draft.get("organization_name").lower() in lower_body),
+            bool(draft.get("city") and draft.get("city").lower() in lower_body),
+            bool(draft.get("job_title") and draft.get("job_title").lower() in lower_body),
+        ]
+    )
+    personalization = "High" if personalization_points >= 3 else "Medium" if personalization_points >= 1 else "Low"
+    quality = "Good" if not quality_issues and spam_risk != "High" else "Needs Review"
+
+    return {
+        "quality": quality,
+        "spam_risk": spam_risk,
+        "personalization": personalization,
+        "issues": quality_issues,
+        "subject_length": subject_length,
+        "message_words": message_length,
+        "spam_hits": spam_hits,
+    }
+
+
 def show_outreach_campaigns():
     st.title("Outreach Campaigns")
     metrics = get_outreach_campaign_metrics()
@@ -1481,15 +1801,107 @@ def show_outreach_campaigns():
         st.subheader("Campaign Metrics")
         st.dataframe(pd.DataFrame(metrics), use_container_width=True, hide_index=True)
 
+    campaign_result = st.session_state.get("outreach_campaign_result")
+    if campaign_result:
+        st.subheader("Campaign Results")
+        result_cols = st.columns(5)
+        result_cols[0].metric("Sent", int(campaign_result.get("sent") or 0))
+        result_cols[1].metric("Failed", int(campaign_result.get("failed") or 0))
+        result_cols[2].metric("Skipped", int(campaign_result.get("skipped") or 0))
+        result_cols[3].write("Campaign")
+        result_cols[3].caption(campaign_result.get("campaign_name", "-"))
+        result_cols[4].write("Timestamp")
+        result_cols[4].caption(campaign_result.get("timestamp", "-"))
+        result_action_cols = st.columns(3)
+        if result_action_cols[0].button("View Failed", key="view_failed_outreach_results"):
+            st.session_state.show_failed_outreach_results = not st.session_state.get("show_failed_outreach_results", False)
+        if result_action_cols[1].button("Open Follow-up Queue", key="open_followup_from_campaign_result"):
+            st.session_state.pending_page = "Follow-up Queue"
+            st.rerun()
+        if result_action_cols[2].button("Clear Results", key="clear_outreach_results"):
+            st.session_state.pop("outreach_campaign_result", None)
+            st.session_state.pop("show_failed_outreach_results", None)
+            st.rerun()
+        if st.session_state.get("show_failed_outreach_results"):
+            failed_messages = campaign_result.get("failed_messages") or []
+            if failed_messages:
+                st.dataframe(pd.DataFrame(failed_messages), use_container_width=True, hide_index=True)
+            else:
+                st.info("No failed recipients.")
+
     st.subheader("Select Campaign Audience")
     options = get_campaign_filter_options()
+    templates = get_outreach_campaign_templates()
+    template_map = {template["template_name"]: template for template in templates}
+
+    template_cols = st.columns([2, 1])
+    selected_template = template_cols[0].selectbox(
+        "Campaign Template",
+        ["None"] + list(template_map.keys()),
+        key="outreach_template_selector",
+    )
+    if template_cols[1].button("Load Template", key="load_outreach_template", disabled=selected_template == "None"):
+        template = template_map[selected_template]
+        st.session_state.outreach_campaign_name = template.get("campaign_name") or template["template_name"]
+        st.session_state.outreach_subject_template = template.get("subject_template") or OUTREACH_SUBJECT_TEMPLATES[0]
+        st.session_state.outreach_campaign_instructions = template.get("instructions") or ""
+        st.session_state.outreach_campaign_name_input = st.session_state.outreach_campaign_name
+        st.session_state.outreach_subject_template_input = st.session_state.outreach_subject_template
+        st.session_state.outreach_campaign_instructions_input = st.session_state.outreach_campaign_instructions
+        st.session_state.outreach_subject_preset = "Custom"
+        st.session_state.outreach_instruction_preset = "Custom"
+        st.session_state.outreach_last_subject_preset = "Custom"
+        st.session_state.outreach_last_instruction_preset = "Custom"
+        st.rerun()
+
     filter_cols = st.columns(5)
-    campaign_name = filter_cols[0].text_input("Campaign Name", value=st.session_state.get("outreach_campaign_name", "1Aim Vietnam Support"))
+    campaign_name = filter_cols[0].text_input(
+        "Campaign Name",
+        value=st.session_state.get("outreach_campaign_name", "1Aim Vietnam Support"),
+        key="outreach_campaign_name_input",
+    )
     country = filter_cols[1].selectbox("Country", ["All"] + options["countries"])
     membership = filter_cols[2].selectbox("Membership", ["All"] + options["memberships"])
     lead_status = filter_cols[3].selectbox("Lead Status", ["All"] + options["lead_statuses"])
     relationship_status = filter_cols[4].selectbox("Relationship Status", ["All"] + options["relationship_statuses"])
     limit = st.selectbox("Audience Size", [30, 40, 50], index=2)
+
+    subject_preset = st.selectbox(
+        "Default Subject Template",
+        OUTREACH_SUBJECT_TEMPLATES + ["Custom"],
+        key="outreach_subject_preset",
+    )
+    if subject_preset != "Custom" and st.session_state.get("outreach_last_subject_preset") != subject_preset:
+        st.session_state.outreach_subject_template = subject_preset
+        st.session_state.outreach_subject_template_input = subject_preset
+        st.session_state.outreach_last_subject_preset = subject_preset
+
+    subject_template = st.text_input(
+        "Campaign Subject Template",
+        value=st.session_state.get("outreach_subject_template", OUTREACH_SUBJECT_TEMPLATES[0]),
+        key="outreach_subject_template_input",
+        help="Supported tokens: {{first_name}}, {{contact_name}}, {{company}}, {{city}}, {{country}}, {{membership}}, {{job_title}}",
+    )
+
+    instruction_preset = st.selectbox(
+        "Campaign Instruction Preset",
+        list(OUTREACH_INSTRUCTION_PRESETS.keys()),
+        key="outreach_instruction_preset",
+    )
+    if st.session_state.get("outreach_last_instruction_preset") != instruction_preset:
+        preset_text = OUTREACH_INSTRUCTION_PRESETS[instruction_preset]
+        if instruction_preset != "Custom":
+            st.session_state.outreach_campaign_instructions = preset_text
+            st.session_state.outreach_campaign_instructions_input = preset_text
+        st.session_state.outreach_last_instruction_preset = instruction_preset
+
+    instructions = st.text_area(
+        "Campaign Instructions",
+        value=st.session_state.get("outreach_campaign_instructions", ""),
+        height=120,
+        key="outreach_campaign_instructions_input",
+        placeholder='Example: Use first name only. Keep under 120 words. More friendly. Mention OLO HCM. Avoid saying "backend support".',
+    )
 
     filters = {
         "country": "" if country == "All" else country,
@@ -1498,9 +1910,25 @@ def show_outreach_campaigns():
         "relationship_status": "" if relationship_status == "All" else relationship_status,
         "limit": limit,
     }
+    invalid_email_skip_count = get_campaign_invalid_email_skip_count(filters)
+    if invalid_email_skip_count:
+        st.warning(f"{invalid_email_skip_count} contacts skipped due to bounced/invalid email.")
 
-    if st.button("Generate Messages", key="generate_outreach_messages"):
-        audience = get_campaign_audience(filters)
+    save_cols = st.columns([2, 1])
+    template_name = save_cols[0].text_input("Save Template As", key="save_outreach_template_name")
+    if save_cols[1].button("Save Campaign Template", key="save_outreach_template", disabled=not template_name.strip()):
+        save_outreach_campaign_template(
+            template_name.strip(),
+            campaign_name.strip(),
+            subject_template.strip(),
+            instructions.strip(),
+        )
+        st.success("Campaign template saved.")
+        st.rerun()
+
+    def build_outreach_drafts(max_rows):
+        draft_filters = {**filters, "limit": max_rows}
+        audience = get_campaign_audience(draft_filters)
         drafts = []
         for row in audience:
             if not is_valid_email(row.get("email")):
@@ -1508,69 +1936,201 @@ def show_outreach_campaigns():
             drafts.append(
                 {
                     **row,
-                    "subject": generate_outreach_subject(row, campaign_name),
-                    "message_body": generate_outreach_message(row, campaign_name),
+                    "subject": generate_outreach_subject(row, campaign_name, subject_template),
+                    "message_body": generate_outreach_message(row, campaign_name, instructions),
                     "message_version": 1,
+                    "send": True,
                 }
             )
+        return drafts, draft_filters
+
+    generation_cols = st.columns(3)
+    if generation_cols[0].button("Preview First 5", key="preview_outreach_messages"):
+        drafts, draft_filters = build_outreach_drafts(5)
         st.session_state.outreach_campaign_name = campaign_name
-        st.session_state.outreach_campaign_filters = filters
+        st.session_state.outreach_subject_template = subject_template
+        st.session_state.outreach_campaign_instructions = instructions
+        st.session_state.outreach_campaign_filters = draft_filters
+        st.session_state.outreach_invalid_email_skip_count = invalid_email_skip_count
         st.session_state.outreach_campaign_drafts = drafts
+        st.session_state.outreach_campaign_mode = "Preview First 5"
+        st.session_state.outreach_preview_sent = False
+        st.session_state.outreach_final_reviewed = False
+        st.success(f"Generated preview for {len(drafts)} emails.")
+        st.rerun()
+
+    if generation_cols[1].button("Regenerate Campaign", key="regenerate_outreach_messages"):
+        current_count = len(st.session_state.get("outreach_campaign_drafts", [])) or limit
+        drafts, draft_filters = build_outreach_drafts(current_count)
+        st.session_state.outreach_campaign_name = campaign_name
+        st.session_state.outreach_subject_template = subject_template
+        st.session_state.outreach_campaign_instructions = instructions
+        st.session_state.outreach_campaign_filters = draft_filters
+        st.session_state.outreach_invalid_email_skip_count = invalid_email_skip_count
+        st.session_state.outreach_campaign_drafts = drafts
+        st.session_state.outreach_campaign_mode = f"Regenerated {current_count}"
+        st.session_state.outreach_preview_sent = False
+        st.session_state.outreach_final_reviewed = False
+        st.success(f"Regenerated {len(drafts)} personalized messages.")
+        st.rerun()
+
+    if generation_cols[2].button("Generate Full Campaign", key="generate_full_outreach_messages"):
+        drafts, draft_filters = build_outreach_drafts(limit)
+        st.session_state.outreach_campaign_name = campaign_name
+        st.session_state.outreach_subject_template = subject_template
+        st.session_state.outreach_campaign_instructions = instructions
+        st.session_state.outreach_campaign_filters = draft_filters
+        st.session_state.outreach_invalid_email_skip_count = invalid_email_skip_count
+        st.session_state.outreach_campaign_drafts = drafts
+        st.session_state.outreach_campaign_mode = "Full Campaign"
+        st.session_state.outreach_preview_sent = False
+        st.session_state.outreach_final_reviewed = False
         st.success(f"Generated {len(drafts)} personalized messages.")
         st.rerun()
 
     drafts = st.session_state.get("outreach_campaign_drafts", [])
     if not drafts:
-        st.info("Choose filters and generate messages to start a campaign.")
+        st.info("Choose filters and preview or generate messages to start a campaign.")
         return
 
+    st.subheader("Apply Edit To All Drafts")
+    edit_cols = st.columns([2, 2, 1])
+    find_text = edit_cols[0].text_input("Find text", key="outreach_find_text")
+    replace_text = edit_cols[1].text_input("Replace with", key="outreach_replace_text")
+    if edit_cols[2].button("Apply To All Drafts", key="apply_edit_all_drafts", disabled=not find_text):
+        updated_drafts = []
+        for index, draft in enumerate(drafts):
+            body_key = f"outreach_body_{draft.get('lead_id')}_{index}"
+            current_body = st.session_state.get(body_key, draft.get("message_body", ""))
+            updated_body = current_body.replace(find_text, replace_text)
+            draft = {**draft, "message_body": updated_body, "message_version": int(draft.get("message_version") or 1) + 1}
+            st.session_state[body_key] = updated_body
+            updated_drafts.append(draft)
+        st.session_state.outreach_campaign_drafts = updated_drafts
+        st.success(f"Applied edit to {len(updated_drafts)} drafts.")
+        st.rerun()
+
     st.subheader("Review Messages")
-    st.caption(f"{len(drafts)} contacts selected. Review and edit before sending.")
+    st.caption(f"{st.session_state.get('outreach_campaign_mode', 'Draft')} | Review, exclude, and edit before sending.")
 
     edited_messages = []
+    selected_count = 0
     for index, draft in enumerate(drafts):
         label = f"{draft.get('contact_name') or 'No contact'} - {draft.get('organization_name') or 'No company'}"
         with st.expander(label, expanded=index < 3):
-            st.caption(f"{draft.get('email')} | {draft.get('city') or '-'} / {draft.get('country') or '-'} | {draft.get('job_title') or '-'}")
-            subject = st.text_input(
-                "Subject",
-                value=draft["subject"],
-                key=f"outreach_subject_{draft['lead_id']}",
+            send_enabled = st.checkbox(
+                "Send",
+                value=bool(draft.get("send", True)),
+                key=f"outreach_send_{draft.get('lead_id')}_{index}",
             )
+            st.caption(f"{draft.get('email')} | {draft.get('city') or '-'} / {draft.get('country') or '-'} | {draft.get('job_title') or '-'}")
+            subject = render_subject_template(subject_template, draft, campaign_name)
+            st.write("Subject Preview")
+            st.code(subject, language=None)
             message_body = st.text_area(
                 "Message Preview",
                 value=draft["message_body"],
                 height=220,
-                key=f"outreach_body_{draft['lead_id']}",
+                key=f"outreach_body_{draft.get('lead_id')}_{index}",
             )
+            quality = evaluate_outreach_quality(draft, subject, message_body)
+            quality_cols = st.columns(3)
+            quality_cols[0].write(f"Quality: {quality['quality']}")
+            quality_cols[1].write(f"Spam Risk: {quality['spam_risk']}")
+            quality_cols[2].write(f"Personalization: {quality['personalization']}")
+            if quality["issues"] or quality["spam_hits"]:
+                review_notes = list(quality["issues"])
+                if quality["spam_hits"]:
+                    review_notes.append(f"Spam words: {', '.join(quality['spam_hits'])}")
+                st.caption("Review: " + ", ".join(review_notes))
+            if send_enabled:
+                selected_count += 1
             edited_messages.append(
                 {
                     **draft,
                     "subject": subject,
                     "message_body": message_body,
                     "message_version": draft.get("message_version", 1),
+                    "send": send_enabled,
                 }
             )
 
-    st.subheader("Approve Campaign")
+    excluded_count = len(edited_messages) - selected_count
+    count_cols = st.columns(2)
+    count_cols[0].metric("Selected", selected_count)
+    count_cols[1].metric("Excluded", excluded_count)
+
+    selected_messages = [message for message in edited_messages if message.get("send")]
+    country_counts = {}
+    for message in selected_messages:
+        country_name = message.get("country") or "Unknown"
+        country_counts[country_name] = country_counts.get(country_name, 0) + 1
+
+    st.subheader("Send Preview To Myself")
+    preview_cols = st.columns([2, 1, 2])
+    preview_email = preview_cols[0].text_input("Preview Email", value=get_app_setting("smtp_from_email", ""), key="outreach_preview_email")
+    preview_limit = preview_cols[1].selectbox("Preview Count", [1, 3, 5], index=2, key="outreach_preview_count")
+    can_send_preview = is_smtp_configured() and is_valid_email(preview_email) and bool(selected_messages)
+    if preview_cols[2].button("Send Preview To Myself", key="send_outreach_preview", disabled=not can_send_preview):
+        preview_result = send_outreach_preview_email(preview_email, selected_messages, preview_limit)
+        st.session_state.outreach_preview_sent = preview_result["sent"] > 0
+        if preview_result["failed"]:
+            st.warning(f"Preview sent: {preview_result['sent']}. Failed: {preview_result['failed']}.")
+            if preview_result.get("errors"):
+                st.caption(" | ".join(preview_result["errors"][:3]))
+        else:
+            st.success(f"Preview sent to {preview_email}.")
+
+    st.subheader("Campaign Summary")
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Selected Recipients", selected_count)
+    summary_cols[1].metric("Excluded Recipients", excluded_count)
+    summary_cols[2].write("Subject")
+    summary_cols[2].caption(subject_template)
+    summary_cols[3].write("Instruction Preset")
+    summary_cols[3].caption(instruction_preset)
+    more_summary_cols = st.columns(3)
+    more_summary_cols[0].metric("Estimated Emails", selected_count)
+    more_summary_cols[1].write("Preview Sent")
+    more_summary_cols[1].caption("Yes" if st.session_state.get("outreach_preview_sent") else "No")
+    more_summary_cols[2].write("Signature")
+    more_summary_cols[2].caption("1Aim Logistics Signature")
+
+    if country_counts:
+        st.write("Countries")
+        st.dataframe(
+            pd.DataFrame(
+                [{"Country": country_name, "Recipients": count} for country_name, count in sorted(country_counts.items())]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Final Approval")
     if not is_smtp_configured():
         st.warning("Email sending is not configured. Add SMTP settings in Admin before approving the campaign.")
 
-    approve_disabled = not is_smtp_configured() or not edited_messages or not campaign_name.strip()
-    if st.button("Approve & Send", type="primary", disabled=approve_disabled, key="approve_outreach_campaign"):
+    reviewed = st.checkbox("I reviewed and approve this campaign", key="outreach_final_reviewed")
+    approve_disabled = not is_smtp_configured() or not selected_messages or not campaign_name.strip() or not reviewed
+    if st.button("Final Approve & Send", type="primary", disabled=approve_disabled, key="approve_outreach_campaign"):
         result = create_and_send_outreach_campaign(
             campaign_name.strip(),
             st.session_state.get("outreach_campaign_filters", filters),
-            edited_messages,
+            selected_messages,
+            subject_template.strip(),
+            instructions.strip(),
         )
+        result["campaign_name"] = campaign_name.strip()
+        result["timestamp"] = datetime.now().isoformat(timespec="seconds")
+        result["skipped"] = excluded_count + int(st.session_state.get("outreach_invalid_email_skip_count", 0) or 0)
         st.session_state.pop("outreach_campaign_drafts", None)
-        st.success(
-            f"Campaign sent. Sent: {result['sent']}. Failed: {result['failed']}."
-        )
+        st.session_state.outreach_campaign_result = result
+        st.success(f"Campaign sent. Sent: {result['sent']}. Failed: {result['failed']}.")
         st.rerun()
 
     if st.button("Clear Campaign Draft", key="clear_outreach_campaign"):
         st.session_state.pop("outreach_campaign_drafts", None)
+        st.session_state.pop("outreach_preview_sent", None)
         st.rerun()
 
 
@@ -2730,6 +3290,17 @@ def show_lead_detail(lead_id):
         contact_data["name"] = st.text_input("Contact Name", value=detail_value(contact, "name"), disabled=not editing or not contact)
         contact_data["job_title"] = st.text_input("Job Title", value=detail_value(contact, "job_title"), disabled=not editing or not contact)
         contact_data["email"] = st.text_input("Email", value=detail_value(contact, "email"), disabled=not editing or not contact)
+        contact_data["email_status"] = st.selectbox(
+            "Email Status",
+            EMAIL_STATUS_OPTIONS,
+            index=EMAIL_STATUS_OPTIONS.index(detail_value(contact, "email_status", "Unknown")) if detail_value(contact, "email_status", "Unknown") in EMAIL_STATUS_OPTIONS else 0,
+            disabled=not editing or not contact,
+        )
+        email_action_cols = st.columns(3)
+        for col, status in zip(email_action_cols, ["Valid", "Invalid", "Bounced"]):
+            if col.button(f"Mark Email {status}", key=f"email_status_{status}_{lead_id}", disabled=not contact):
+                update_contact_email_status(contact["id"], status, "Manual update from Lead Detail")
+                st.rerun()
         contact_data["phone"] = st.text_input("Phone", value=detail_value(contact, "phone"), disabled=not editing or not contact)
         contact_data["wechat"] = st.text_input("WeChat", value=detail_value(contact, "wechat"), disabled=not editing or not contact)
         contact_data["whatsapp"] = st.text_input("Whatsapp", value=detail_value(contact, "whatsapp"), disabled=not editing or not contact)
@@ -2961,6 +3532,7 @@ with st.sidebar:
     )
 
 apply_global_typography(st.session_state.ui_scale)
+maybe_run_auto_git_backup()
 
 if page == "Dashboard":
     show_dashboard()

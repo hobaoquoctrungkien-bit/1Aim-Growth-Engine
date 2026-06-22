@@ -39,6 +39,19 @@ Kien Ho
 
 ---
 
+Date: 2026-06-22
+
+Decision:
+Git backup must use an application-level lock and stale Git lock cleanup.
+
+Reason:
+Windows intermittently leaves `index.lock` or `packed-refs.lock` when multiple Git processes touch the repo. A higher-level lock prevents concurrent backup execution, while stale lock cleanup avoids unnecessary manual repair.
+
+Approved By:
+Kien Ho
+
+---
+
 Date: 2026-06-21
 
 Decision:
@@ -120,10 +133,127 @@ Kien Ho
 Date: 2026-06-22
 
 Decision:
+Campaign Instructions tune the existing rule-based outreach generator instead of calling an external AI API.
+
+Reason:
+Kien needs fast campaign tuning, but the current CRM direction avoids AI automation for outreach sending. Rule-based tuning keeps messages predictable and avoids token waste.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Outreach campaigns require recipient selection and a final approval summary before sending.
+
+Reason:
+Bulk outreach should remain controlled. Include/exclude checkboxes and a final summary reduce accidental sends while preserving one-workflow execution.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Outreach campaign review uses rule-based quality checks instead of AI scoring.
+
+Reason:
+Kien needs fast safety signals for 30-50 messages, but V1 should remain predictable, local, and free from external AI dependency.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Preview emails do not update CRM lead, contact, campaign, or activity state.
+
+Reason:
+Preview sends are delivery tests for Kien, not real outreach. Real CRM state should only change after final campaign approval and successful recipient send.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Hard-bounced or manually invalid emails are excluded from future outreach campaigns by default.
+
+Reason:
+Repeated sends to invalid recipients damage deliverability and waste review time. Email hygiene should protect campaign execution automatically after bounce detection.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Bounce emails are recorded as processed but not deleted from the mailbox in V1.
+
+Reason:
+Keeping the original mailbox evidence is safer while the parser is new. The processed table prevents duplicate CRM updates without destructive email actions.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Invalid and bounced email cleanup belongs in Admin.
+
+Reason:
+Email hygiene is an operational maintenance task. Keeping it beside bounce processing lets Kien process bounces, fix typos, and restore valid contacts without mixing cleanup into daily sales screens.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Email signature is managed centrally in CRM settings and appended to future generated outreach messages.
+
+Reason:
+Central signature management keeps campaign messages consistent and avoids editing the same signature in every draft.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
 SMTP configuration must be testable before campaign approval.
 
 Reason:
 Campaign sending should not be attempted blindly. A test email reduces the risk of failed or misconfigured outreach runs.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+SMTP encryption mode must be explicit.
+
+Reason:
+Different providers use different ports and encryption modes. Explicit SSL, TLS, and None settings make timeout and connection failures easier to diagnose.
 
 Approved By:
 Kien Ho

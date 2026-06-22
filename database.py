@@ -1,10 +1,17 @@
+import email
+import imaplib
 import sqlite3
 import smtplib
+import re
+import socket
+import ssl
 import time
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from email.message import EmailMessage
+from email.header import decode_header
+from html import unescape
 from pathlib import Path
 
 DB_PATH = Path("data/growth_engine.db")
@@ -165,6 +172,7 @@ def init_db():
         full_name TEXT NOT NULL,
         name TEXT,
         email TEXT,
+        email_status TEXT DEFAULT 'Unknown',
         wechat TEXT,
         whatsapp TEXT,
         phone TEXT,
@@ -358,6 +366,7 @@ def init_db():
         message_body TEXT,
         message_version INTEGER DEFAULT 1,
         status TEXT DEFAULT 'Draft',
+        delivery_status TEXT DEFAULT 'Unknown',
         sent_at TEXT,
         opened_at TEXT,
         replied_at TEXT,
@@ -369,6 +378,40 @@ def init_db():
         FOREIGN KEY(lead_id) REFERENCES leads(id),
         FOREIGN KEY(organization_id) REFERENCES organizations(id),
         FOREIGN KEY(contact_id) REFERENCES contacts(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS processed_bounce_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL UNIQUE,
+        processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        bounced_email TEXT,
+        bounce_type TEXT,
+        reason TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS outreach_campaign_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_name TEXT NOT NULL UNIQUE,
+        campaign_name TEXT,
+        subject_template TEXT,
+        instructions TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS backup_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+        commit_hash TEXT,
+        branch TEXT,
+        status TEXT,
+        message TEXT
     )
     """)
 
@@ -402,19 +445,33 @@ def init_db():
 
     add_column("tasks", "channel TEXT")
     add_column("tasks", "campaign_name TEXT")
+    add_column("contacts", "email_status TEXT DEFAULT 'Unknown'")
     add_column("outreach_campaigns", "country_filter TEXT")
     add_column("outreach_campaigns", "membership_filter TEXT")
     add_column("outreach_campaigns", "lead_status_filter TEXT")
     add_column("outreach_campaigns", "relationship_status_filter TEXT")
+    add_column("outreach_campaigns", "subject_template TEXT")
+    add_column("outreach_campaigns", "instructions TEXT")
     add_column("outreach_campaigns", "status TEXT DEFAULT 'Draft'")
     add_column("outreach_campaigns", "approved_at TEXT")
     add_column("outreach_campaigns", "sent_at TEXT")
     add_column("outreach_campaigns", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
     add_column("outreach_messages", "message_version INTEGER DEFAULT 1")
+    add_column("outreach_messages", "delivery_status TEXT DEFAULT 'Unknown'")
     add_column("outreach_messages", "opened_at TEXT")
     add_column("outreach_messages", "replied_at TEXT")
     add_column("outreach_messages", "qualified_at TEXT")
     add_column("outreach_messages", "error_message TEXT")
+    add_column("outreach_campaign_templates", "campaign_name TEXT")
+    add_column("outreach_campaign_templates", "subject_template TEXT")
+    add_column("outreach_campaign_templates", "instructions TEXT")
+    add_column("backup_history", "commit_hash TEXT")
+    add_column("backup_history", "branch TEXT")
+    add_column("backup_history", "status TEXT")
+    add_column("backup_history", "message TEXT")
+    add_column("processed_bounce_messages", "bounced_email TEXT")
+    add_column("processed_bounce_messages", "bounce_type TEXT")
+    add_column("processed_bounce_messages", "reason TEXT")
     add_column("tasks", "assigned_to INTEGER")
     add_column("tasks", "created_by INTEGER")
     add_column("activities", "lead_id INTEGER")
@@ -2016,11 +2073,64 @@ def set_app_setting(setting_key, setting_value):
     conn.close()
 
 
+def record_backup_history(commit_hash, branch, status, message):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO backup_history (
+            timestamp,
+            commit_hash,
+            branch,
+            status,
+            message
+        )
+        VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?)
+        """,
+        (commit_hash, branch, status, message),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_backup_history(limit=20):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM backup_history
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_last_successful_backup():
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT *
+        FROM backup_history
+        WHERE status = 'succeeded'
+        ORDER BY timestamp DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_smtp_settings():
     try:
         port = int(get_app_setting("smtp_port", "587") or 587)
     except (TypeError, ValueError):
         port = 587
+    encryption = get_app_setting("smtp_encryption", "")
+    if not encryption:
+        encryption = "TLS" if get_app_setting("smtp_use_tls", "1") == "1" else "None"
     return {
         "host": get_app_setting("smtp_host", ""),
         "port": port,
@@ -2028,13 +2138,92 @@ def get_smtp_settings():
         "password": get_app_setting("smtp_password", ""),
         "from_email": get_app_setting("smtp_from_email", ""),
         "from_name": get_app_setting("smtp_from_name", "1Aim"),
-        "use_tls": get_app_setting("smtp_use_tls", "1") == "1",
+        "encryption": encryption if encryption in ["SSL", "TLS", "None"] else "TLS",
     }
 
 
 def is_smtp_configured():
     settings = get_smtp_settings()
     return bool(settings["host"] and settings["from_email"])
+
+
+def classify_smtp_error(exc):
+    text = str(exc)
+    if isinstance(exc, (socket.timeout, TimeoutError)) or "timed out" in text.lower():
+        return "Timeout: Cannot connect to SMTP server within the timeout window."
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return "Authentication failed: Invalid credentials."
+    if isinstance(exc, ssl.SSLError):
+        return "TLS negotiation failed: Check encryption type and port."
+    if isinstance(exc, (ConnectionRefusedError, socket.gaierror, OSError)):
+        return f"Cannot connect to SMTP server: {text}"
+    if isinstance(exc, smtplib.SMTPConnectError):
+        return f"Cannot connect to SMTP server: {text}"
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return f"Cannot connect to SMTP server: {text}"
+    if isinstance(exc, smtplib.SMTPException):
+        return f"SMTP error: {text}"
+    return text
+
+
+def open_smtp_connection(settings, timeout=20):
+    if settings["encryption"] == "SSL":
+        return smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=timeout)
+
+    server = smtplib.SMTP(settings["host"], settings["port"], timeout=timeout)
+    if settings["encryption"] == "TLS":
+        server.starttls()
+    return server
+
+
+def test_smtp_connection():
+    settings = get_smtp_settings()
+    if not settings["host"]:
+        return {
+            "ok": False,
+            "connection": "Missing SMTP host",
+            "encryption": "Not tested",
+            "authentication": "Not tested",
+            "error": "SMTP host is required.",
+        }
+
+    try:
+        with open_smtp_connection(settings) as server:
+            connection = "Connection OK"
+            encryption = "Encryption OK"
+            if settings["username"]:
+                server.login(settings["username"], settings["password"])
+                authentication = "Authentication OK"
+            else:
+                authentication = "Authentication skipped"
+        return {
+            "ok": True,
+            "connection": connection,
+            "encryption": encryption,
+            "authentication": authentication,
+            "error": "",
+        }
+    except Exception as exc:
+        message = classify_smtp_error(exc)
+        lower = message.lower()
+        return {
+            "ok": False,
+            "connection": "Cannot connect to SMTP server" if "connect" in lower or "timeout" in lower else "Connection failed",
+            "encryption": "TLS negotiation failed" if "tls" in lower else "Encryption failed" if settings["encryption"] != "None" else "No encryption",
+            "authentication": "Authentication failed" if "authentication" in lower or "credentials" in lower else "Not completed",
+            "error": message,
+        }
+
+
+def looks_like_html(value):
+    return bool(re.search(r"</?[a-z][\s\S]*>", value or "", flags=re.IGNORECASE))
+
+
+def strip_html(value):
+    text = re.sub(r"<\s*br\s*/?>", "\n", value or "", flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return unescape(text).strip()
 
 
 def send_email_via_smtp(to_email, subject, message_body):
@@ -2050,18 +2239,431 @@ def send_email_via_smtp(to_email, subject, message_body):
         else settings["from_email"]
     )
     message["To"] = to_email
-    message.set_content(message_body)
+    if looks_like_html(message_body):
+        message.set_content(strip_html(message_body))
+        message.add_alternative(message_body.replace("\n", "<br>\n"), subtype="html")
+    else:
+        message.set_content(message_body)
 
     try:
-        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as server:
-            if settings["use_tls"]:
-                server.starttls()
+        with open_smtp_connection(settings, timeout=30) as server:
             if settings["username"]:
                 server.login(settings["username"], settings["password"])
             server.send_message(message)
         return True, ""
     except Exception as exc:
-        return False, str(exc)
+        return False, classify_smtp_error(exc)
+
+
+def send_outreach_preview_email(to_email, messages, limit=3):
+    sent = 0
+    failed = 0
+    errors = []
+    for message in messages[:limit]:
+        ok, error_message = send_email_via_smtp(
+            to_email,
+            f"[PREVIEW] {message.get('subject', '')}",
+            message.get("message_body", ""),
+        )
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+            errors.append(error_message)
+    return {"sent": sent, "failed": failed, "errors": errors}
+
+
+BOUNCE_SUBJECT_MARKERS = [
+    "undelivered mail returned to sender",
+    "mail delivery failed",
+    "delivery status notification",
+    "returned mail",
+    "mailer-daemon",
+]
+
+HARD_BOUNCE_MARKERS = [
+    "5.1.1",
+    "recipient does not exist",
+    "user unknown",
+    "mailbox unavailable",
+    "no such user",
+]
+
+SOFT_BOUNCE_MARKERS = [
+    "mailbox full",
+    "temporarily unavailable",
+    "connection timed out",
+    "greylisted",
+]
+
+
+def decode_mime_header(value):
+    parts = decode_header(value or "")
+    decoded = []
+    for part, charset in parts:
+        if isinstance(part, bytes):
+            decoded.append(part.decode(charset or "utf-8", errors="ignore"))
+        else:
+            decoded.append(part)
+    return "".join(decoded)
+
+
+def extract_message_text(message):
+    chunks = []
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = part.get_content_type()
+            if content_type not in ["text/plain", "message/delivery-status", "text/html"]:
+                continue
+            payload = part.get_payload(decode=True)
+            if payload:
+                chunks.append(payload.decode(part.get_content_charset() or "utf-8", errors="ignore"))
+    else:
+        payload = message.get_payload(decode=True)
+        if payload:
+            chunks.append(payload.decode(message.get_content_charset() or "utf-8", errors="ignore"))
+    return "\n".join(chunks)
+
+
+def parse_bounced_email(body):
+    patterns = [
+        r"Final-Recipient:\s*(?:rfc822;)?\s*([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})",
+        r"Original-Recipient:\s*(?:rfc822;)?\s*([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})",
+        r"RCPT TO:\s*<?([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})>?",
+        r"Recipient:\s*<?([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})>?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, body or "", flags=re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+    emails = re.findall(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", body or "", flags=re.IGNORECASE)
+    ignored_domains = ["1aimlogistics.com"]
+    for found in emails:
+        lowered = found.lower()
+        if not any(lowered.endswith(f"@{domain}") for domain in ignored_domains):
+            return lowered
+    return emails[0].lower() if emails else ""
+
+
+def classify_bounce(body):
+    lower = (body or "").lower()
+    if any(marker in lower for marker in HARD_BOUNCE_MARKERS):
+        return "Hard"
+    if any(marker in lower for marker in SOFT_BOUNCE_MARKERS) or re.search(r"\b4\.\d+\.\d+\b", lower):
+        return "Soft"
+    return "Unknown"
+
+
+def summarize_bounce_reason(body):
+    lower = (body or "").lower()
+    for marker in HARD_BOUNCE_MARKERS + SOFT_BOUNCE_MARKERS:
+        if marker in lower:
+            return marker
+    status_match = re.search(r"\b[45]\.\d+\.\d+\b", body or "")
+    if status_match:
+        return status_match.group(0)
+    lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
+    return lines[0][:240] if lines else "Bounce reason unavailable"
+
+
+def record_processed_bounce(cur, message_id, bounced_email, bounce_type, reason):
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO processed_bounce_messages (
+            message_id,
+            processed_at,
+            bounced_email,
+            bounce_type,
+            reason
+        )
+        VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)
+        """,
+        (message_id, bounced_email, bounce_type, reason),
+    )
+
+
+def update_contact_email_status(contact_id, status, reason="", user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    contact = cur.execute(
+        """
+        SELECT contacts.id, contacts.email, contacts.notes, contacts.organization_id, leads.id AS lead_id
+        FROM contacts
+        LEFT JOIN leads ON leads.contact_id = contacts.id
+        WHERE contacts.id = ?
+        ORDER BY leads.updated_at DESC, leads.id DESC
+        LIMIT 1
+        """,
+        (contact_id,),
+    ).fetchone()
+    if not contact:
+        conn.close()
+        return False
+
+    note_suffix = ""
+    if reason:
+        note_suffix = f"\nEmail marked {status} on {date.today().isoformat()}: {reason}"
+    cur.execute(
+        """
+        UPDATE contacts
+        SET email_status = ?,
+            notes = COALESCE(notes, '') || ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, note_suffix, contact_id),
+    )
+    log_crm_activity(
+        cur,
+        f"Email {status}",
+        f"{contact['email']} marked {status}. {reason}".strip(),
+        lead_id=contact["lead_id"],
+        organization_id=contact["organization_id"],
+        contact_id=contact_id,
+        user=user,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_invalid_email_contacts(status_filter="All", search_text="", limit=100):
+    status = clean_value(status_filter)
+    search = f"%{clean_value(search_text)}%"
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            contacts.id AS contact_id,
+            contacts.name AS contact_name,
+            contacts.full_name,
+            contacts.email,
+            COALESCE(contacts.email_status, 'Unknown') AS email_status,
+            contacts.notes,
+            contacts.updated_at,
+            organizations.id AS organization_id,
+            organizations.name AS organization_name,
+            organizations.country,
+            organizations.city,
+            latest_leads.lead_id
+        FROM contacts
+        LEFT JOIN organizations ON organizations.id = contacts.organization_id
+        LEFT JOIN (
+            SELECT contact_id, MAX(id) AS lead_id
+            FROM leads
+            GROUP BY contact_id
+        ) latest_leads ON latest_leads.contact_id = contacts.id
+        WHERE COALESCE(contacts.email_status, 'Unknown') IN ('Bounced', 'Invalid')
+            AND (? = 'All' OR COALESCE(contacts.email_status, 'Unknown') = ?)
+            AND (
+                ? = '%%'
+                OR LOWER(COALESCE(contacts.email, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(contacts.name, contacts.full_name, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(organizations.name, '')) LIKE LOWER(?)
+            )
+        ORDER BY contacts.updated_at DESC, contacts.id DESC
+        LIMIT ?
+        """,
+        (
+            status,
+            status,
+            search,
+            search,
+            search,
+            search,
+            int(limit or 100),
+        ),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_contact_email_address(contact_id, email_address, status="Valid", reason="", user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    contact = cur.execute(
+        """
+        SELECT contacts.id, contacts.email, contacts.organization_id, leads.id AS lead_id
+        FROM contacts
+        LEFT JOIN leads ON leads.contact_id = contacts.id
+        WHERE contacts.id = ?
+        ORDER BY leads.updated_at DESC, leads.id DESC
+        LIMIT 1
+        """,
+        (contact_id,),
+    ).fetchone()
+    if not contact:
+        conn.close()
+        return False
+
+    old_email = contact["email"] or ""
+    note = f"\nEmail corrected on {date.today().isoformat()}: {old_email} -> {email_address}"
+    if reason:
+        note += f" ({reason})"
+    cur.execute(
+        """
+        UPDATE contacts
+        SET email = ?,
+            email_status = ?,
+            notes = COALESCE(notes, '') || ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (email_address, status, note, contact_id),
+    )
+    log_crm_activity(
+        cur,
+        "Contact Update",
+        f"Email corrected from {old_email or '-'} to {email_address}; status {status}",
+        lead_id=contact["lead_id"],
+        organization_id=contact["organization_id"],
+        contact_id=contact_id,
+        user=user,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def apply_bounce_to_crm(cur, bounced_email, bounce_type, reason, user="admin"):
+    contact = cur.execute(
+        """
+        SELECT contacts.id, contacts.email, contacts.notes, contacts.organization_id, leads.id AS lead_id
+        FROM contacts
+        LEFT JOIN leads ON leads.contact_id = contacts.id
+        WHERE LOWER(TRIM(contacts.email)) = LOWER(TRIM(?))
+        ORDER BY leads.updated_at DESC, leads.id DESC
+        LIMIT 1
+        """,
+        (bounced_email,),
+    ).fetchone()
+    if not contact:
+        return False
+
+    activity_type = "Email Bounced" if bounce_type == "Hard" else "Email Soft Bounce"
+    if bounce_type == "Hard":
+        note = f"\nEmail hard bounced on {date.today().isoformat()}: {reason}"
+        cur.execute(
+            """
+            UPDATE contacts
+            SET email_status = 'Bounced',
+                notes = COALESCE(notes, '') || ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (note, contact["id"]),
+        )
+        cur.execute(
+            """
+            UPDATE outreach_messages
+            SET delivery_status = 'Bounced',
+                status = CASE WHEN status = 'Sent' THEN 'Bounced' ELSE status END,
+                error_message = COALESCE(NULLIF(error_message, ''), ?),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
+            """,
+            (reason, bounced_email),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE outreach_messages
+            SET delivery_status = 'Bounced',
+                error_message = COALESCE(NULLIF(error_message, ''), ?),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
+            """,
+            (reason, bounced_email),
+        )
+
+    log_crm_activity(
+        cur,
+        activity_type,
+        f"{bounced_email}: {reason}",
+        lead_id=contact["lead_id"],
+        organization_id=contact["organization_id"],
+        contact_id=contact["id"],
+        user=user,
+    )
+    return True
+
+
+def process_email_bounces(max_messages=100, user="admin"):
+    settings = get_smtp_settings()
+    username = settings.get("username")
+    password = settings.get("password")
+    host = get_app_setting("imap_host", "mail.1aimlogistics.com")
+    try:
+        port = int(get_app_setting("imap_port", "993") or 993)
+    except (TypeError, ValueError):
+        port = 993
+
+    result = {
+        "scanned": 0,
+        "hard_bounces": 0,
+        "soft_bounces": 0,
+        "contacts_updated": 0,
+        "unmatched": [],
+        "errors": [],
+    }
+    if not username or not password:
+        result["errors"].append("IMAP username/password missing. Save SMTP username and password first.")
+        return result
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        with imaplib.IMAP4_SSL(host, port) as mailbox:
+            mailbox.login(username, password)
+            mailbox.select("INBOX")
+            status, data = mailbox.search(None, "ALL")
+            if status != "OK":
+                result["errors"].append("Unable to search mailbox.")
+                return result
+            message_ids = data[0].split()[-int(max_messages):]
+            for message_id_bytes in reversed(message_ids):
+                imap_id = message_id_bytes.decode()
+                fetch_status, fetch_data = mailbox.fetch(message_id_bytes, "(RFC822)")
+                if fetch_status != "OK" or not fetch_data or not fetch_data[0]:
+                    continue
+                raw_message = fetch_data[0][1]
+                message = email.message_from_bytes(raw_message)
+                mail_message_id = message.get("Message-ID") or f"imap:{imap_id}"
+                already_processed = cur.execute(
+                    "SELECT 1 FROM processed_bounce_messages WHERE message_id = ?",
+                    (mail_message_id,),
+                ).fetchone()
+                if already_processed:
+                    continue
+                subject = decode_mime_header(message.get("Subject", ""))
+                if not any(marker in subject.lower() for marker in BOUNCE_SUBJECT_MARKERS):
+                    continue
+
+                result["scanned"] += 1
+                body = extract_message_text(message)
+                bounced_email = parse_bounced_email(body)
+                bounce_type = classify_bounce(body)
+                reason = summarize_bounce_reason(body)
+                if bounce_type == "Hard":
+                    result["hard_bounces"] += 1
+                elif bounce_type == "Soft":
+                    result["soft_bounces"] += 1
+
+                updated = bool(bounced_email) and apply_bounce_to_crm(cur, bounced_email, bounce_type, reason, user=user)
+                if updated:
+                    result["contacts_updated"] += 1
+                elif bounced_email:
+                    result["unmatched"].append(bounced_email)
+                else:
+                    result["unmatched"].append("(no recipient found)")
+                record_processed_bounce(cur, mail_message_id, bounced_email, bounce_type, reason)
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        result["errors"].append(str(exc))
+    finally:
+        conn.close()
+    return result
 
 
 def get_campaign_filter_options():
@@ -2113,11 +2715,13 @@ def get_campaign_audience(filters):
             COALESCE(organizations.membership, leads.membership, '') AS membership,
             COALESCE(leads.lead_status, 'New') AS lead_status,
             COALESCE(contacts.relationship_status, 'New') AS relationship_status,
+            COALESCE(contacts.email_status, 'Unknown') AS email_status,
             COALESCE(contacts.email, leads.email, '') AS email
         FROM leads
         LEFT JOIN organizations ON organizations.id = leads.organization_id
         LEFT JOIN contacts ON contacts.id = leads.contact_id
         WHERE COALESCE(contacts.email, leads.email, '') <> ''
+            AND COALESCE(contacts.email_status, 'Unknown') NOT IN ('Bounced', 'Invalid')
             AND (? = '' OR LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = LOWER(TRIM(?)))
             AND (? = '' OR LOWER(COALESCE(organizations.membership, leads.membership, '')) LIKE '%' || LOWER(?) || '%')
             AND (? = '' OR COALESCE(leads.lead_status, 'New') = ?)
@@ -2143,13 +2747,112 @@ def get_campaign_audience(filters):
     return [dict(row) for row in rows]
 
 
-def generate_outreach_subject(row, campaign_name):
+def get_campaign_invalid_email_skip_count(filters):
+    country = clean_value(filters.get("country"))
+    membership = clean_value(filters.get("membership"))
+    lead_status = clean_value(filters.get("lead_status"))
+    relationship_status = clean_value(filters.get("relationship_status"))
+
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS skipped
+        FROM leads
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        WHERE COALESCE(contacts.email, leads.email, '') <> ''
+            AND COALESCE(contacts.email_status, 'Unknown') IN ('Bounced', 'Invalid')
+            AND (? = '' OR LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = LOWER(TRIM(?)))
+            AND (? = '' OR LOWER(COALESCE(organizations.membership, leads.membership, '')) LIKE '%' || LOWER(?) || '%')
+            AND (? = '' OR COALESCE(leads.lead_status, 'New') = ?)
+            AND (? = '' OR COALESCE(contacts.relationship_status, 'New') = ?)
+        """,
+        (
+            country,
+            country,
+            membership,
+            membership,
+            lead_status,
+            lead_status,
+            relationship_status,
+            relationship_status,
+        ),
+    ).fetchone()
+    conn.close()
+    return int(row["skipped"] or 0) if row else 0
+
+
+def get_email_signature_settings():
+    return {
+        "name": get_app_setting("signature_name", "Kien Ho"),
+        "title": get_app_setting("signature_title", "CEO"),
+        "company": get_app_setting("signature_company", "1Aim Logistics"),
+        "phone": get_app_setting("signature_phone", ""),
+        "email": get_app_setting("signature_email", ""),
+        "website": get_app_setting("signature_website", ""),
+        "wechat": get_app_setting("signature_wechat", ""),
+        "whatsapp": get_app_setting("signature_whatsapp", ""),
+        "html": get_app_setting("signature_html", ""),
+    }
+
+
+def render_email_signature():
+    signature = get_email_signature_settings()
+    if clean_value(signature["html"]):
+        return signature["html"]
+
+    lines = [
+        "Best regards,",
+        "",
+        signature["name"],
+        signature["title"],
+        signature["company"],
+    ]
+    contact_lines = []
+    if signature["phone"]:
+        contact_lines.append(f"Mobile: {signature['phone']}")
+    if signature["email"]:
+        contact_lines.append(f"Email: {signature['email']}")
+    if signature["website"]:
+        contact_lines.append(f"Website: {signature['website']}")
+    if signature["wechat"]:
+        contact_lines.append(f"WeChat: {signature['wechat']}")
+    if signature["whatsapp"]:
+        contact_lines.append(f"WhatsApp: {signature['whatsapp']}")
+    if contact_lines:
+        lines.extend(["", *contact_lines])
+    return "\n".join(line for line in lines if line is not None)
+
+
+def render_subject_template(subject_template, row, campaign_name=""):
     company = clean_value(row_value(row, "organization_name", "your team"))
-    return f"{campaign_name} - 1Aim x {company}" if campaign_name else f"1Aim x {company}"
+    contact_name = clean_value(row_value(row, "contact_name", ""))
+    values = {
+        "{{name}}": contact_name,
+        "{{contact_name}}": contact_name,
+        "{{first_name}}": contact_name.split()[0] if contact_name else "",
+        "{{company}}": company,
+        "{{city}}": clean_value(row_value(row, "city", "")),
+        "{{country}}": clean_value(row_value(row, "country", "")),
+        "{{membership}}": clean_value(row_value(row, "membership", "")),
+        "{{job_title}}": clean_value(row_value(row, "job_title", "")),
+        "{{campaign}}": campaign_name,
+    }
+    subject = subject_template or "OLO HCM 2026, {{first_name}}"
+    for token, value in values.items():
+        subject = subject.replace(token, value)
+    return " ".join(subject.split())
 
 
-def generate_outreach_message(row, campaign_name):
-    name = clean_value(row_value(row, "contact_name", "")) or "there"
+def generate_outreach_subject(row, campaign_name, subject_template=None):
+    return render_subject_template(subject_template or "OLO HCM 2026, {{first_name}}", row, campaign_name)
+
+
+def generate_outreach_message(row, campaign_name, instructions=""):
+    raw_name = clean_value(row_value(row, "contact_name", ""))
+    instruction_text = normalize(instructions)
+    use_first_name = "first name" in instruction_text
+    name = raw_name.split()[0] if use_first_name and raw_name else raw_name or "there"
     company = clean_value(row_value(row, "organization_name", "your team"))
     city = clean_value(row_value(row, "city", ""))
     country = clean_value(row_value(row, "country", ""))
@@ -2158,20 +2861,78 @@ def generate_outreach_message(row, campaign_name):
     location = " / ".join(part for part in [city, country] if part)
     role_line = f" I noticed your role as {job_title}." if job_title else ""
     location_line = f" Since {company} is based in {location}, I wanted to reach out directly." if location else ""
+    mention_olo = "olo" in instruction_text
+    avoid_backend = "avoid saying \"backend support\"" in instruction_text or "avoid saying backend support" in instruction_text
+    friendly = "friendly" in instruction_text
+    short = "under 120 words" in instruction_text or "short" in instruction_text
 
-    return (
-        f"Hi {name},\n\n"
-        f"This is Kien from 1Aim in Vietnam.{role_line}{location_line}\n\n"
-        "We support freight forwarders with Vietnam-related shipments, overseas coordination, "
-        "and backend follow-up work so partners can respond faster and keep customers moving.\n\n"
-        "Would it be useful to stay connected and explore how 1Aim can support your team when you have Vietnam inquiries?\n\n"
-        "Best regards,\n"
-        "Kien Ho\n"
-        "1Aim"
+    intro = "Hope you're doing well." if friendly else ""
+    support_phrase = (
+        "We support freight forwarders with Vietnam-related shipments and overseas coordination."
+        if avoid_backend
+        else "We support freight forwarders with Vietnam-related shipments, overseas coordination, and backend follow-up work."
     )
+    olo_phrase = " I would also be happy to connect around OLO HCM." if mention_olo else ""
+
+    if short:
+        body = (
+            f"Hi {name},\n\n"
+            f"This is Kien from 1Aim in Vietnam. {intro}\n\n"
+            f"{support_phrase}{olo_phrase} Would it be useful to stay connected for Vietnam inquiries?\n\n"
+        )
+    else:
+        body = (
+            f"Hi {name},\n\n"
+            f"This is Kien from 1Aim in Vietnam.{role_line}{location_line} {intro}\n\n"
+            f"{support_phrase} "
+            "Our goal is to help partners respond faster and keep customers moving."
+            f"{olo_phrase}\n\n"
+            "Would it be useful to stay connected and explore how 1Aim can support your team when you have Vietnam inquiries?\n\n"
+        )
+
+    return body + render_email_signature()
 
 
-def create_and_send_outreach_campaign(campaign_name, filters, messages, user="admin"):
+def get_outreach_campaign_templates():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM outreach_campaign_templates
+        ORDER BY template_name
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_outreach_campaign_template(template_name, campaign_name, subject_template, instructions):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO outreach_campaign_templates (
+            template_name,
+            campaign_name,
+            subject_template,
+            instructions,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(template_name) DO UPDATE SET
+            campaign_name = excluded.campaign_name,
+            subject_template = excluded.subject_template,
+            instructions = excluded.instructions,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (template_name, campaign_name, subject_template, instructions),
+    )
+    conn.commit()
+    conn.close()
+
+
+def create_and_send_outreach_campaign(campaign_name, filters, messages, subject_template="", instructions="", user="admin"):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -2182,12 +2943,14 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, user="ad
             membership_filter,
             lead_status_filter,
             relationship_status_filter,
+            subject_template,
+            instructions,
             status,
             created_at,
             approved_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 'Approved', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Approved', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """,
         (
             campaign_name,
@@ -2195,11 +2958,13 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, user="ad
             clean_value(filters.get("membership")),
             clean_value(filters.get("lead_status")),
             clean_value(filters.get("relationship_status")),
+            subject_template,
+            instructions,
         ),
     )
     campaign_id = cur.lastrowid
 
-    results = {"sent": 0, "failed": 0, "campaign_id": campaign_id}
+    results = {"sent": 0, "failed": 0, "skipped": 0, "campaign_id": campaign_id, "failed_messages": []}
     for message in messages:
         ok, error_message = send_email_via_smtp(
             message["email"],
@@ -2220,12 +2985,13 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, user="ad
                 message_body,
                 message_version,
                 status,
+                delivery_status,
                 sent_at,
                 error_message,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             (
                 campaign_id,
@@ -2236,6 +3002,7 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, user="ad
                 message.get("subject"),
                 message.get("message_body"),
                 int(message.get("message_version") or 1),
+                status,
                 status,
                 sent_at,
                 error_message,
@@ -2270,8 +3037,8 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, user="ad
                 )
             log_crm_activity(
                 cur,
-                "Outreach Campaign Sent",
-                f"Sent campaign {campaign_name} to {message.get('email')}",
+                "Email Sent",
+                f"Campaign {campaign_name}: {message.get('subject')} sent to {message.get('email')} at {sent_at}",
                 lead_id=message.get("lead_id"),
                 organization_id=message.get("organization_id"),
                 contact_id=message.get("contact_id"),
@@ -2279,6 +3046,15 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, user="ad
             )
         else:
             results["failed"] += 1
+            results["failed_messages"].append(
+                {
+                    "email": message.get("email"),
+                    "contact": message.get("contact_name"),
+                    "company": message.get("organization_name"),
+                    "subject": message.get("subject"),
+                    "error": error_message,
+                }
+            )
 
     cur.execute(
         """
@@ -3387,6 +4163,7 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
                 job_title = ?,
                 title = ?,
                 email = ?,
+                email_status = ?,
                 phone = ?,
                 wechat = ?,
                 whatsapp = ?,
@@ -3408,6 +4185,7 @@ def update_lead_detail(lead_id, organization_data, contact_data, lead_data):
                 contact_data.get("job_title"),
                 contact_data.get("job_title"),
                 contact_data.get("email"),
+                contact_data.get("email_status") or "Unknown",
                 contact_data.get("phone"),
                 contact_data.get("wechat"),
                 contact_data.get("whatsapp"),

@@ -25,13 +25,15 @@ python scripts/git_backup.py --message "Your commit message" --force-unlock
 1. Detects the current repository path.
 2. Detects the current branch.
 3. Detects `origin` remote.
-4. Checks `.git/index.lock`.
-5. Removes `.git/index.lock` when `--force-unlock` is used.
-6. Runs `git status --short`.
-7. Runs `git add .`.
-8. Runs `git commit -m "<message>"`.
-9. Runs `git push origin <current_branch>`.
-10. Prints branch, commit hash, push status, and any error.
+4. Creates an application-level backup lock to prevent concurrent backups.
+5. Checks `.git/index.lock` and `.git/packed-refs.lock`.
+6. Removes stale Git lock files older than 5 minutes.
+7. Removes Git lock files when `--force-unlock` is used.
+8. Runs `git status --short`.
+9. Runs `git add .`.
+10. Runs `git commit -m "<message>"`.
+11. Runs `git push origin <current_branch>`.
+12. Prints branch, commit hash, push status, and any error.
 
 The script only reports success when the commit step succeeds or there is nothing to commit, and the push succeeds.
 
@@ -51,6 +53,12 @@ On Windows, Git can fail with:
 
 ```text
 Unable to create .git/index.lock: Permission denied
+```
+
+It can also fail with:
+
+```text
+Unable to create .git/packed-refs.lock: Permission denied
 ```
 
 Common causes:
@@ -84,3 +92,29 @@ backup_git.bat
 - If the current branch is `master`, it pushes `origin master`.
 - If the current branch is `main`, it pushes `origin main`.
 - It never claims Git updated unless push succeeded.
+
+## Admin Git Health Monitor
+
+Admin shows:
+
+- Repository path
+- Current branch
+- Remote URL
+- Last commit hash
+- Last commit time
+- Last push time
+- Backup history
+- Auto Backup Every setting
+
+Status colors:
+
+- Green: working tree clean and local branch equals remote branch
+- Yellow: uncommitted changes exist or local branch is ahead of remote
+- Red: push failed, branch is behind remote, permission error, or Git lock error
+
+Auto backup options:
+
+- Off
+- 30 min
+- 1 hour
+- 4 hours

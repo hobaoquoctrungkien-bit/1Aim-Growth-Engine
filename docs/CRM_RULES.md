@@ -186,21 +186,38 @@ Outreach campaigns allow Kien to send personalized email outreach at scale after
 Campaign workflow:
 
 1. Select audience by country, membership, lead status, and relationship status.
-2. Generate rule-based personalized drafts using contact and organization fields.
-3. Review and edit each message.
-4. Approve and send manually.
-5. Update CRM follow-up state after successful send.
+2. Preview the first 5 messages before generating the full campaign.
+3. Choose a subject template and instruction preset.
+4. Generate rule-based personalized drafts using contact and organization fields.
+5. Review each recipient and uncheck anyone who should be excluded.
+6. Apply global find/replace edits when a phrase needs to change across all drafts.
+7. Review quality checks for subject length, message length, greeting, signature, first-name use, and spam-risk words.
+8. Send preview messages to Kien before real sending when needed.
+9. Review the campaign summary and approve with the required review checkbox.
+10. Final approve and send manually.
+11. Update CRM follow-up state after successful send.
 
 Campaign sending rules:
 
 - Do not use AI generation for V1/V2.
-- Do not send without explicit `Approve & Send`.
+- Campaign Instructions tune the rule-based generator only; they do not call an external AI API.
+- Do not send without explicit `Final Approve & Send`.
 - Do not send if SMTP settings are missing.
+- Only checked recipients are sent.
+- Contacts with `email_status` of `Bounced` or `Invalid` are skipped by default.
+- The campaign subject is managed globally with tokens such as `{{first_name}}`, `{{contact_name}}`, `{{company}}`, `{{city}}`, `{{country}}`, `{{membership}}`, and `{{job_title}}`.
+- Default subjects should be short and person-focused, avoiding long company-heavy subjects.
+- Generated messages automatically append the centrally managed email signature.
+- Campaign templates can be saved and reused for campaign name, subject template, and instructions.
+- Preview sends must prefix the subject with `[PREVIEW]` and must not update CRM lead/contact state.
 - SMTP settings should be verified with a test email before sending a real campaign.
+- SMTP connection can be tested without sending email.
+- SMTP encryption must be explicit: SSL, TLS, or None.
 - After a successful send, set `lead_status = Contacted`.
 - After a successful send, set `next_action = Follow-up`.
 - After a successful send, set `next_action_date = today + 7 days`.
-- Log an activity for each sent message.
+- Log an `Email Sent` activity for each successfully sent message, including campaign name, subject, recipient email, and sent timestamp.
+- Failed recipients must not stop the campaign. Store the recipient error and continue sending remaining emails.
 
 Campaign metrics:
 
@@ -208,3 +225,60 @@ Campaign metrics:
 - Opened
 - Replied
 - Qualified
+
+## Email Bounce Handling
+
+Contact email status values:
+
+- Valid
+- Invalid
+- Bounced
+- Unknown
+
+Default status is `Unknown`.
+
+Hard bounce indicators include:
+
+- `5.1.1`
+- recipient does not exist
+- user unknown
+- mailbox unavailable
+- no such user
+
+Soft bounce indicators include:
+
+- mailbox full
+- temporarily unavailable
+- `4.x.x`
+- connection timed out
+- greylisted
+
+Hard bounce behavior:
+
+- Set `contact.email_status = Bounced`.
+- Append a hard bounce note to the contact.
+- Create an `Email Bounced` activity.
+- Mark matching outreach messages as bounced.
+- Exclude the contact from future outreach campaigns by default.
+
+Soft bounce behavior:
+
+- Keep contact email status unchanged.
+- Create an `Email Soft Bounce` activity.
+- Allow retry later.
+
+Bounce processing reads mailbox messages by IMAP, stores processed message IDs, and does not delete bounce emails in V1.
+
+## Invalid Email Cleanup
+
+Admin should provide a cleanup view for contacts with `email_status` of `Bounced` or `Invalid`.
+
+Cleanup actions:
+
+- Correct the email and mark it `Valid`.
+- Mark current email `Valid`.
+- Mark current email `Invalid`.
+- Mark current email `Bounced`.
+- Open the linked lead for full CRM context.
+
+Corrected emails should append a contact note and create a contact update activity.
