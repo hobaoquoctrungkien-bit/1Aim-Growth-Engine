@@ -1314,278 +1314,268 @@ def maybe_run_auto_git_backup():
 def show_admin():
     st.title("Admin")
 
-    status = get_database_backup_status()
-    col1, col2, col3 = st.columns(3)
+    with st.expander("Database Backup Status", expanded=False):
+        status = get_database_backup_status()
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Current DB Size", format_bytes(status["db_size_bytes"]))
+        col2.metric("Backups", status["backup_count"])
+        col3.metric("Latest Backup Time", status["latest_backup_time"] or "No backups")
+        if status["latest_backup_name"]:
+            st.caption(f"Latest backup: {status['latest_backup_name']}")
 
-    with col1:
-        st.metric("Current DB Size", format_bytes(status["db_size_bytes"]))
-    with col2:
-        st.metric("Backups", status["backup_count"])
-    with col3:
-        st.metric("Latest Backup Time", status["latest_backup_time"] or "No backups")
+    with st.expander("Git Status", expanded=False):
+        git_health = get_git_health()
+        git_cols = st.columns(3)
+        git_cols[0].text_input("Repository Path", value=git_health["repo_path"], disabled=True)
+        git_cols[1].text_input("Current Branch", value=git_health["branch"], disabled=True)
+        git_cols[2].text_input("Remote URL", value=git_health["remote_url"], disabled=True)
 
-    if status["latest_backup_name"]:
-        st.caption(f"Latest backup: {status['latest_backup_name']}")
+        git_cols2 = st.columns(4)
+        git_cols2[0].text_input("Last Commit Hash", value=git_health["last_commit_hash"], disabled=True)
+        git_cols2[1].text_input("Last Commit Time", value=git_health["last_commit_time"], disabled=True)
+        git_cols2[2].text_input("Last Push Time", value=git_health["last_push_time"], disabled=True)
+        with git_cols2[3]:
+            st.write("Status")
+            render_git_indicator(git_health["indicator"])
+            st.caption(git_health["status"])
 
-    st.divider()
-    st.subheader("Git Status")
-    git_health = get_git_health()
-    git_cols = st.columns(3)
-    git_cols[0].text_input("Repository Path", value=git_health["repo_path"], disabled=True)
-    git_cols[1].text_input("Current Branch", value=git_health["branch"], disabled=True)
-    git_cols[2].text_input("Remote URL", value=git_health["remote_url"], disabled=True)
+        if git_health["error_message"]:
+            st.error(git_health["error_message"])
+        if git_health["suggested_fix"]:
+            st.info(git_health["suggested_fix"])
 
-    git_cols2 = st.columns(4)
-    git_cols2[0].text_input("Last Commit Hash", value=git_health["last_commit_hash"], disabled=True)
-    git_cols2[1].text_input("Last Commit Time", value=git_health["last_commit_time"], disabled=True)
-    git_cols2[2].text_input("Last Push Time", value=git_health["last_push_time"], disabled=True)
-    with git_cols2[3]:
-        st.write("Status")
-        render_git_indicator(git_health["indicator"])
-        st.caption(git_health["status"])
-
-    if git_health["error_message"]:
-        st.error(git_health["error_message"])
-    if git_health["suggested_fix"]:
-        st.info(git_health["suggested_fix"])
-
-    auto_options = ["Off", "30 min", "1 hour", "4 hours"]
-    current_auto_backup = get_app_setting("git_auto_backup_every", "Off")
-    auto_cols = st.columns([1, 1, 2])
-    selected_auto_backup = auto_cols[0].selectbox(
-        "Auto Backup Every",
-        auto_options,
-        index=auto_options.index(current_auto_backup) if current_auto_backup in auto_options else 0,
-    )
-    if auto_cols[1].button("Save Auto Backup", key="save_git_auto_backup"):
-        set_app_setting("git_auto_backup_every", selected_auto_backup)
-        st.success("Auto backup setting saved.")
-        st.rerun()
-
-    backup_running = st.session_state.get("git_backup_running", False) or get_app_setting("git_backup_running", "0") == "1"
-    backup_label = "Backup Running..." if backup_running else "Backup Now"
-    if auto_cols[2].button(backup_label, key="admin_backup_now", disabled=backup_running):
-        with st.spinner("Running Git backup..."):
-            returncode, output = run_git_backup_now("Auto backup CRM progress")
-            st.session_state.git_backup_output = output
-            st.session_state.git_backup_returncode = returncode
-            if returncode == 0:
-                st.success("Git backup succeeded.")
-            else:
-                st.error("Git backup failed.")
-
-    if st.session_state.get("git_backup_output"):
-        st.caption("Backup output")
-        st.code(st.session_state.git_backup_output)
-
-    history = get_backup_history(20)
-    st.caption("Backup History")
-    if history:
-        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
-    else:
-        st.info("No backup history yet.")
-
-    st.divider()
-    st.subheader("System Settings")
-    capacity_options = [10, 20, 30, 50]
-    current_capacity = get_daily_outreach_capacity()
-    selected_capacity = st.selectbox(
-        "Daily Outreach Capacity",
-        capacity_options,
-        index=capacity_options.index(current_capacity) if current_capacity in capacity_options else 0,
-    )
-    if st.button("Save Capacity", key="save_daily_outreach_capacity"):
-        set_app_setting("daily_outreach_capacity", str(selected_capacity))
-        st.success("Daily outreach capacity saved.")
-        st.rerun()
-
-    st.divider()
-    st.subheader("Email Sending")
-    smtp_cols = st.columns(2)
-    smtp_host = smtp_cols[0].text_input("SMTP Host", value=get_app_setting("smtp_host", ""))
-    smtp_port = smtp_cols[1].text_input("SMTP Port", value=get_app_setting("smtp_port", "587"))
-    smtp_user = smtp_cols[0].text_input("SMTP Username", value=get_app_setting("smtp_username", ""))
-    smtp_password = smtp_cols[1].text_input("SMTP Password", value=get_app_setting("smtp_password", ""), type="password")
-    smtp_from_email = smtp_cols[0].text_input("From Email", value=get_app_setting("smtp_from_email", ""))
-    smtp_from_name = smtp_cols[1].text_input("From Name", value=get_app_setting("smtp_from_name", "1Aim"))
-    current_encryption = get_app_setting("smtp_encryption", "")
-    if not current_encryption:
-        current_encryption = "TLS" if get_app_setting("smtp_use_tls", "1") == "1" else "None"
-    encryption_options = ["SSL", "TLS", "None"]
-    smtp_encryption = st.selectbox(
-        "Encryption Type",
-        encryption_options,
-        index=encryption_options.index(current_encryption) if current_encryption in encryption_options else 1,
-    )
-    debug_cols = st.columns(3)
-    debug_cols[0].metric("Host", smtp_host or "-")
-    debug_cols[1].metric("Port", smtp_port or "-")
-    debug_cols[2].metric("Encryption Type", smtp_encryption)
-    if st.button("Save Email Settings", key="save_smtp_settings"):
-        for key, value in [
-            ("smtp_host", smtp_host),
-            ("smtp_port", smtp_port),
-            ("smtp_username", smtp_user),
-            ("smtp_password", smtp_password),
-            ("smtp_from_email", smtp_from_email),
-            ("smtp_from_name", smtp_from_name),
-            ("smtp_encryption", smtp_encryption),
-            ("smtp_use_tls", "1" if smtp_encryption == "TLS" else "0"),
-        ]:
-            set_app_setting(key, value)
-        st.success("Email settings saved.")
-        st.rerun()
-
-    test_connection_disabled = not bool(get_app_setting("smtp_host", ""))
-    if st.button("Test Connection", disabled=test_connection_disabled, key="test_smtp_connection"):
-        result = test_smtp_connection()
-        result_cols = st.columns(3)
-        result_cols[0].write(result["connection"])
-        result_cols[1].write(result["encryption"])
-        result_cols[2].write(result["authentication"])
-        if result["ok"]:
-            st.success("SMTP connection test passed.")
-        else:
-            st.error(result["error"])
-
-    test_cols = st.columns([2, 1])
-    test_email = test_cols[0].text_input("Test Email To", key="smtp_test_email")
-    can_send_test = is_smtp_configured() and is_valid_email(test_email)
-    if test_cols[1].button("Send Test Email", disabled=not can_send_test, key="send_smtp_test_email"):
-        ok, error_message = send_email_via_smtp(
-            test_email.strip(),
-            "1Aim SMTP Test",
-            "This is a test email from 1Aim Growth Engine. SMTP sending is configured correctly.",
+        auto_options = ["Off", "30 min", "1 hour", "4 hours"]
+        current_auto_backup = get_app_setting("git_auto_backup_every", "Off")
+        auto_cols = st.columns([1, 1, 2])
+        selected_auto_backup = auto_cols[0].selectbox(
+            "Auto Backup Every",
+            auto_options,
+            index=auto_options.index(current_auto_backup) if current_auto_backup in auto_options else 0,
         )
-        if ok:
-            st.success("Test email sent.")
-        else:
-            st.error(f"Test email failed: {error_message}")
-    if not is_smtp_configured():
-        st.caption("Save SMTP host and from email before sending a test email.")
-    elif test_email and not is_valid_email(test_email):
-        st.caption("Enter a valid test email address.")
+        if auto_cols[1].button("Save Auto Backup", key="save_git_auto_backup"):
+            set_app_setting("git_auto_backup_every", selected_auto_backup)
+            st.success("Auto backup setting saved.")
+            st.rerun()
 
-    st.divider()
-    st.subheader("Email Bounce Processing")
-    imap_cols = st.columns(4)
-    imap_cols[0].metric("IMAP Host", get_app_setting("imap_host", "mail.1aimlogistics.com"))
-    imap_cols[1].metric("IMAP Port", get_app_setting("imap_port", "993"))
-    imap_cols[2].metric("Encryption", "SSL")
-    imap_cols[3].metric("Username", get_app_setting("smtp_username", "") or "-")
-    max_bounce_messages = st.selectbox("Mailbox Scan Limit", [50, 100, 200, 500], index=1)
-    if st.button("Process Bounce Emails", key="process_bounce_emails"):
-        with st.spinner("Reading bounce emails from mailbox..."):
-            result = process_email_bounces(max_bounce_messages)
-        st.session_state.bounce_processing_result = result
-
-    bounce_result = st.session_state.get("bounce_processing_result")
-    if bounce_result:
-        bounce_cols = st.columns(5)
-        bounce_cols[0].metric("Bounce Emails Scanned", bounce_result.get("scanned", 0))
-        bounce_cols[1].metric("Hard Bounces Found", bounce_result.get("hard_bounces", 0))
-        bounce_cols[2].metric("Soft Bounces Found", bounce_result.get("soft_bounces", 0))
-        bounce_cols[3].metric("Contacts Updated", bounce_result.get("contacts_updated", 0))
-        bounce_cols[4].metric("Unmatched", len(bounce_result.get("unmatched", [])))
-        if bounce_result.get("unmatched"):
-            st.caption("Unmatched bounced emails")
-            st.dataframe(pd.DataFrame({"Email": bounce_result["unmatched"]}), use_container_width=True, hide_index=True)
-        if bounce_result.get("errors"):
-            st.error(" | ".join(bounce_result["errors"]))
-
-    st.subheader("Invalid / Bounced Email Cleanup")
-    cleanup_filters = st.columns([1, 2, 1])
-    cleanup_status = cleanup_filters[0].selectbox("Email Status Filter", ["All", "Bounced", "Invalid"], key="email_cleanup_status")
-    cleanup_search = cleanup_filters[1].text_input("Search Contact / Company / Email", key="email_cleanup_search")
-    cleanup_limit = cleanup_filters[2].selectbox("Rows", [25, 50, 100, 200], index=1, key="email_cleanup_limit")
-    bad_email_rows = get_invalid_email_contacts(cleanup_status, cleanup_search, cleanup_limit)
-    status_counts = {
-        "Bounced": sum(1 for row in bad_email_rows if row.get("email_status") == "Bounced"),
-        "Invalid": sum(1 for row in bad_email_rows if row.get("email_status") == "Invalid"),
-    }
-    cleanup_metric_cols = st.columns(3)
-    cleanup_metric_cols[0].metric("Showing", len(bad_email_rows))
-    cleanup_metric_cols[1].metric("Bounced", status_counts["Bounced"])
-    cleanup_metric_cols[2].metric("Invalid", status_counts["Invalid"])
-    if not bad_email_rows:
-        st.info("No invalid or bounced emails found for this filter.")
-    for row in bad_email_rows:
-        title = f"{row.get('contact_name') or row.get('full_name') or 'No contact'} - {row.get('email') or 'No email'}"
-        with st.expander(title):
-            meta_cols = st.columns(4)
-            meta_cols[0].write(row.get("organization_name") or "-")
-            meta_cols[1].write(row.get("country") or "-")
-            meta_cols[2].write(row.get("city") or "-")
-            meta_cols[3].write(row.get("email_status") or "Unknown")
-            corrected_email = st.text_input(
-                "Corrected Email",
-                value=row.get("email") or "",
-                key=f"cleanup_email_{row['contact_id']}",
-            )
-            action_cols = st.columns(5)
-            if action_cols[0].button("Save as Valid", key=f"cleanup_save_valid_{row['contact_id']}"):
-                if is_valid_email(corrected_email):
-                    update_contact_email_address(row["contact_id"], corrected_email.strip(), "Valid", "Email cleanup")
-                    st.success("Email corrected and marked Valid.")
-                    st.rerun()
+        backup_running = st.session_state.get("git_backup_running", False) or get_app_setting("git_backup_running", "0") == "1"
+        backup_label = "Backup Running..." if backup_running else "Backup Now"
+        if auto_cols[2].button(backup_label, key="admin_backup_now", disabled=backup_running):
+            with st.spinner("Running Git backup..."):
+                returncode, output = run_git_backup_now("Auto backup CRM progress")
+                st.session_state.git_backup_output = output
+                st.session_state.git_backup_returncode = returncode
+                if returncode == 0:
+                    st.success("Git backup succeeded.")
                 else:
-                    st.error("Enter a valid email before saving.")
-            if action_cols[1].button("Mark Valid", key=f"cleanup_mark_valid_{row['contact_id']}"):
-                update_contact_email_status(row["contact_id"], "Valid", "Email cleanup")
-                st.rerun()
-            if action_cols[2].button("Mark Invalid", key=f"cleanup_mark_invalid_{row['contact_id']}"):
-                update_contact_email_status(row["contact_id"], "Invalid", "Email cleanup")
-                st.rerun()
-            if action_cols[3].button("Mark Bounced", key=f"cleanup_mark_bounced_{row['contact_id']}"):
-                update_contact_email_status(row["contact_id"], "Bounced", "Email cleanup")
-                st.rerun()
-            if action_cols[4].button("Open Lead", key=f"cleanup_open_lead_{row['contact_id']}", disabled=not row.get("lead_id")):
-                st.session_state.selected_lead_id = row["lead_id"]
-                st.session_state.pending_page = "Leads List"
-                st.rerun()
+                    st.error("Git backup failed.")
 
-    st.divider()
-    st.subheader("Email Signature")
-    sig_cols = st.columns(2)
-    signature_name = sig_cols[0].text_input("Signature Name", value=get_app_setting("signature_name", "Kien Ho"))
-    signature_title = sig_cols[1].text_input("Signature Title", value=get_app_setting("signature_title", "CEO"))
-    signature_company = sig_cols[0].text_input("Signature Company", value=get_app_setting("signature_company", "1Aim Logistics"))
-    signature_phone = sig_cols[1].text_input("Signature Phone", value=get_app_setting("signature_phone", ""))
-    signature_email = sig_cols[0].text_input("Signature Email", value=get_app_setting("signature_email", ""))
-    signature_website = sig_cols[1].text_input("Signature Website", value=get_app_setting("signature_website", ""))
-    signature_wechat = sig_cols[0].text_input("Signature WeChat", value=get_app_setting("signature_wechat", ""))
-    signature_whatsapp = sig_cols[1].text_input("Signature WhatsApp", value=get_app_setting("signature_whatsapp", ""))
-    signature_html = st.text_area("HTML Signature", value=get_app_setting("signature_html", ""), height=120)
-    if st.button("Save Email Signature", key="save_email_signature"):
-        for key, value in [
-            ("signature_name", signature_name),
-            ("signature_title", signature_title),
-            ("signature_company", signature_company),
-            ("signature_phone", signature_phone),
-            ("signature_email", signature_email),
-            ("signature_website", signature_website),
-            ("signature_wechat", signature_wechat),
-            ("signature_whatsapp", signature_whatsapp),
-            ("signature_html", signature_html),
-        ]:
-            set_app_setting(key, value)
-        st.success("Email signature saved.")
-        st.rerun()
+        if st.session_state.get("git_backup_output"):
+            st.caption("Backup output")
+            st.code(st.session_state.git_backup_output)
 
-    st.divider()
-    st.subheader("CRM Activation")
-    st.caption("Initialize missing next actions and spread them across the next 30 days.")
-    if st.button("Activate Missing Lead Follow-ups", key="admin_activate_followups"):
-        result = initialize_missing_lead_followups()
-        st.success(
-            f"Activated {result['updated']} leads"
-            + (f" from {result['start_date']} to {result['end_date']}." if result["updated"] else ".")
+        history = get_backup_history(20)
+        st.caption("Backup History")
+        if history:
+            st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+        else:
+            st.info("No backup history yet.")
+
+    with st.expander("System Settings", expanded=False):
+        capacity_options = [10, 20, 30, 50]
+        current_capacity = get_daily_outreach_capacity()
+        selected_capacity = st.selectbox(
+            "Daily Outreach Capacity",
+            capacity_options,
+            index=capacity_options.index(current_capacity) if current_capacity in capacity_options else 0,
         )
-        st.rerun()
-    if st.button("Recalculate Priority Scores", key="admin_refresh_priority_scores"):
-        updated = refresh_lead_priority_scores()
-        st.success(f"Priority scores recalculated. Updated {updated} leads.")
-        st.rerun()
+        if st.button("Save Capacity", key="save_daily_outreach_capacity"):
+            set_app_setting("daily_outreach_capacity", str(selected_capacity))
+            st.success("Daily outreach capacity saved.")
+            st.rerun()
+
+    with st.expander("Email Sending", expanded=False):
+        smtp_cols = st.columns(2)
+        smtp_host = smtp_cols[0].text_input("SMTP Host", value=get_app_setting("smtp_host", ""))
+        smtp_port = smtp_cols[1].text_input("SMTP Port", value=get_app_setting("smtp_port", "587"))
+        smtp_user = smtp_cols[0].text_input("SMTP Username", value=get_app_setting("smtp_username", ""))
+        smtp_password = smtp_cols[1].text_input("SMTP Password", value=get_app_setting("smtp_password", ""), type="password")
+        smtp_from_email = smtp_cols[0].text_input("From Email", value=get_app_setting("smtp_from_email", ""))
+        smtp_from_name = smtp_cols[1].text_input("From Name", value=get_app_setting("smtp_from_name", "1Aim"))
+        current_encryption = get_app_setting("smtp_encryption", "")
+        if not current_encryption:
+            current_encryption = "TLS" if get_app_setting("smtp_use_tls", "1") == "1" else "None"
+        encryption_options = ["SSL", "TLS", "None"]
+        smtp_encryption = st.selectbox(
+            "Encryption Type",
+            encryption_options,
+            index=encryption_options.index(current_encryption) if current_encryption in encryption_options else 1,
+        )
+        debug_cols = st.columns(3)
+        debug_cols[0].metric("Host", smtp_host or "-")
+        debug_cols[1].metric("Port", smtp_port or "-")
+        debug_cols[2].metric("Encryption Type", smtp_encryption)
+        if st.button("Save Email Settings", key="save_smtp_settings"):
+            for key, value in [
+                ("smtp_host", smtp_host),
+                ("smtp_port", smtp_port),
+                ("smtp_username", smtp_user),
+                ("smtp_password", smtp_password),
+                ("smtp_from_email", smtp_from_email),
+                ("smtp_from_name", smtp_from_name),
+                ("smtp_encryption", smtp_encryption),
+                ("smtp_use_tls", "1" if smtp_encryption == "TLS" else "0"),
+            ]:
+                set_app_setting(key, value)
+            st.success("Email settings saved.")
+            st.rerun()
+
+        test_connection_disabled = not bool(get_app_setting("smtp_host", ""))
+        if st.button("Test Connection", disabled=test_connection_disabled, key="test_smtp_connection"):
+            result = test_smtp_connection()
+            result_cols = st.columns(3)
+            result_cols[0].write(result["connection"])
+            result_cols[1].write(result["encryption"])
+            result_cols[2].write(result["authentication"])
+            if result["ok"]:
+                st.success("SMTP connection test passed.")
+            else:
+                st.error(result["error"])
+
+        test_cols = st.columns([2, 1])
+        test_email = test_cols[0].text_input("Test Email To", key="smtp_test_email")
+        can_send_test = is_smtp_configured() and is_valid_email(test_email)
+        if test_cols[1].button("Send Test Email", disabled=not can_send_test, key="send_smtp_test_email"):
+            ok, error_message = send_email_via_smtp(
+                test_email.strip(),
+                "1Aim SMTP Test",
+                "This is a test email from 1Aim Growth Engine. SMTP sending is configured correctly.",
+            )
+            if ok:
+                st.success("Test email sent.")
+            else:
+                st.error(f"Test email failed: {error_message}")
+        if not is_smtp_configured():
+            st.caption("Save SMTP host and from email before sending a test email.")
+        elif test_email and not is_valid_email(test_email):
+            st.caption("Enter a valid test email address.")
+
+    with st.expander("Email Bounce Processing", expanded=False):
+        imap_cols = st.columns(4)
+        imap_cols[0].metric("IMAP Host", get_app_setting("imap_host", "mail.1aimlogistics.com"))
+        imap_cols[1].metric("IMAP Port", get_app_setting("imap_port", "993"))
+        imap_cols[2].metric("Encryption", "SSL")
+        imap_cols[3].metric("Username", get_app_setting("smtp_username", "") or "-")
+        max_bounce_messages = st.selectbox("Mailbox Scan Limit", [50, 100, 200, 500], index=1)
+        if st.button("Process Bounce Emails", key="process_bounce_emails"):
+            with st.spinner("Reading bounce emails from mailbox..."):
+                result = process_email_bounces(max_bounce_messages)
+            st.session_state.bounce_processing_result = result
+
+        bounce_result = st.session_state.get("bounce_processing_result")
+        if bounce_result:
+            bounce_cols = st.columns(5)
+            bounce_cols[0].metric("Bounce Emails Scanned", bounce_result.get("scanned", 0))
+            bounce_cols[1].metric("Hard Bounces Found", bounce_result.get("hard_bounces", 0))
+            bounce_cols[2].metric("Soft Bounces Found", bounce_result.get("soft_bounces", 0))
+            bounce_cols[3].metric("Contacts Updated", bounce_result.get("contacts_updated", 0))
+            bounce_cols[4].metric("Unmatched", len(bounce_result.get("unmatched", [])))
+            if bounce_result.get("unmatched"):
+                st.caption("Unmatched bounced emails")
+                st.dataframe(pd.DataFrame({"Email": bounce_result["unmatched"]}), use_container_width=True, hide_index=True)
+            if bounce_result.get("errors"):
+                st.error(" | ".join(bounce_result["errors"]))
+
+    with st.expander("Invalid / Bounced Email Cleanup", expanded=False):
+        cleanup_filters = st.columns([1, 2, 1])
+        cleanup_status = cleanup_filters[0].selectbox("Email Status Filter", ["All", "Bounced", "Invalid"], key="email_cleanup_status")
+        cleanup_search = cleanup_filters[1].text_input("Search Contact / Company / Email", key="email_cleanup_search")
+        cleanup_limit = cleanup_filters[2].selectbox("Rows", [25, 50, 100, 200], index=1, key="email_cleanup_limit")
+        bad_email_rows = get_invalid_email_contacts(cleanup_status, cleanup_search, cleanup_limit)
+        status_counts = {
+            "Bounced": sum(1 for row in bad_email_rows if row.get("email_status") == "Bounced"),
+            "Invalid": sum(1 for row in bad_email_rows if row.get("email_status") == "Invalid"),
+        }
+        cleanup_metric_cols = st.columns(3)
+        cleanup_metric_cols[0].metric("Showing", len(bad_email_rows))
+        cleanup_metric_cols[1].metric("Bounced", status_counts["Bounced"])
+        cleanup_metric_cols[2].metric("Invalid", status_counts["Invalid"])
+        if not bad_email_rows:
+            st.info("No invalid or bounced emails found for this filter.")
+        for row in bad_email_rows:
+            title = f"{row.get('contact_name') or row.get('full_name') or 'No contact'} - {row.get('email') or 'No email'}"
+            with st.expander(title):
+                meta_cols = st.columns(4)
+                meta_cols[0].write(row.get("organization_name") or "-")
+                meta_cols[1].write(row.get("country") or "-")
+                meta_cols[2].write(row.get("city") or "-")
+                meta_cols[3].write(row.get("email_status") or "Unknown")
+                corrected_email = st.text_input(
+                    "Corrected Email",
+                    value=row.get("email") or "",
+                    key=f"cleanup_email_{row['contact_id']}",
+                )
+                action_cols = st.columns(5)
+                if action_cols[0].button("Save as Valid", key=f"cleanup_save_valid_{row['contact_id']}"):
+                    if is_valid_email(corrected_email):
+                        update_contact_email_address(row["contact_id"], corrected_email.strip(), "Valid", "Email cleanup")
+                        st.success("Email corrected and marked Valid.")
+                        st.rerun()
+                    else:
+                        st.error("Enter a valid email before saving.")
+                if action_cols[1].button("Mark Valid", key=f"cleanup_mark_valid_{row['contact_id']}"):
+                    update_contact_email_status(row["contact_id"], "Valid", "Email cleanup")
+                    st.rerun()
+                if action_cols[2].button("Mark Invalid", key=f"cleanup_mark_invalid_{row['contact_id']}"):
+                    update_contact_email_status(row["contact_id"], "Invalid", "Email cleanup")
+                    st.rerun()
+                if action_cols[3].button("Mark Bounced", key=f"cleanup_mark_bounced_{row['contact_id']}"):
+                    update_contact_email_status(row["contact_id"], "Bounced", "Email cleanup")
+                    st.rerun()
+                if action_cols[4].button("Open Lead", key=f"cleanup_open_lead_{row['contact_id']}", disabled=not row.get("lead_id")):
+                    st.session_state.selected_lead_id = row["lead_id"]
+                    st.session_state.pending_page = "Leads List"
+                    st.rerun()
+
+    with st.expander("Email Signature", expanded=False):
+        sig_cols = st.columns(2)
+        signature_name = sig_cols[0].text_input("Signature Name", value=get_app_setting("signature_name", "Kien Ho"))
+        signature_title = sig_cols[1].text_input("Signature Title", value=get_app_setting("signature_title", "CEO"))
+        signature_company = sig_cols[0].text_input("Signature Company", value=get_app_setting("signature_company", "1Aim Logistics"))
+        signature_phone = sig_cols[1].text_input("Signature Phone", value=get_app_setting("signature_phone", ""))
+        signature_email = sig_cols[0].text_input("Signature Email", value=get_app_setting("signature_email", ""))
+        signature_website = sig_cols[1].text_input("Signature Website", value=get_app_setting("signature_website", ""))
+        signature_wechat = sig_cols[0].text_input("Signature WeChat", value=get_app_setting("signature_wechat", ""))
+        signature_whatsapp = sig_cols[1].text_input("Signature WhatsApp", value=get_app_setting("signature_whatsapp", ""))
+        signature_html = st.text_area("HTML Signature", value=get_app_setting("signature_html", ""), height=120)
+        if st.button("Save Email Signature", key="save_email_signature"):
+            for key, value in [
+                ("signature_name", signature_name),
+                ("signature_title", signature_title),
+                ("signature_company", signature_company),
+                ("signature_phone", signature_phone),
+                ("signature_email", signature_email),
+                ("signature_website", signature_website),
+                ("signature_wechat", signature_wechat),
+                ("signature_whatsapp", signature_whatsapp),
+                ("signature_html", signature_html),
+            ]:
+                set_app_setting(key, value)
+            st.success("Email signature saved.")
+            st.rerun()
+
+    with st.expander("CRM Activation", expanded=False):
+        st.caption("Initialize missing next actions and spread them across the next 30 days.")
+        if st.button("Activate Missing Lead Follow-ups", key="admin_activate_followups"):
+            result = initialize_missing_lead_followups()
+            st.success(
+                f"Activated {result['updated']} leads"
+                + (f" from {result['start_date']} to {result['end_date']}." if result["updated"] else ".")
+            )
+            st.rerun()
+        if st.button("Recalculate Priority Scores", key="admin_refresh_priority_scores"):
+            updated = refresh_lead_priority_scores()
+            st.success(f"Priority scores recalculated. Updated {updated} leads.")
+            st.rerun()
 
 
 def show_follow_up_queue():

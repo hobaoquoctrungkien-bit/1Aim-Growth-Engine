@@ -224,6 +224,19 @@ Kien Ho
 Date: 2026-06-22
 
 Decision:
+Admin modules should be collapsed by default.
+
+Reason:
+Admin contains many maintenance tools. Collapsed sections keep the page calm and let Kien open only the module needed for the current task.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
 Email signature is managed centrally in CRM settings and appended to future generated outreach messages.
 
 Reason:

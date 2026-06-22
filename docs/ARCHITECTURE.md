@@ -195,6 +195,21 @@ The cleanup view queries contacts with `email_status IN ('Bounced', 'Invalid')`,
 - marking email Valid, Invalid, or Bounced
 - opening the related Lead Detail page
 
+## Admin UX
+
+Admin modules are displayed as collapsed sections by default so operational settings do not overwhelm the page.
+
+Current Admin modules:
+
+- Database Backup Status
+- Git Status
+- System Settings
+- Email Sending
+- Email Bounce Processing
+- Invalid / Bounced Email Cleanup
+- Email Signature
+- CRM Activation
+
 ## Git Health Monitor
 
 Admin includes a Git Status section for local backup visibility.

@@ -47,6 +47,7 @@
 - Added campaign exclusion for contacts marked `Bounced` or `Invalid`.
 - Added manual Lead Detail actions to mark email Valid, Invalid, or Bounced.
 - Added Admin Invalid / Bounced Email Cleanup view with status/search filters, corrected email save, status actions, and Open Lead shortcut.
+- Collapsed Admin modules by default so each maintenance area opens only when clicked.
 - Added CRM updates after successful campaign send: lead contacted, next action follow-up, next action date +7 days.
 - Added campaign metrics for sent, opened, replied, and qualified.
 - Added Git backup automation script `scripts/git_backup.py`.
