@@ -12,4 +12,6 @@ backups/
 .streamlit/
 
 *.log
+*.lock
 data/*.db
+data/*.lock

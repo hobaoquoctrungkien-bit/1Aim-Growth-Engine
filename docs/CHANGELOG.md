@@ -18,6 +18,8 @@
 - Added `PRODUCT_CONSTITUTION.md` as the highest-priority product source of truth.
 - Added `PRODUCT_CONSISTENCY_REPORT.md` comparing the constitution against architecture, CRM rules, `.codex-rules.md`, and current implementation.
 - Updated architecture documentation to reference the Product Constitution and consistency report.
+- Grouped Outreach Campaigns, Quick Capture, Leads Import, and Leads List under the parent Leads menu.
+- Grouped Follow-up Queue and Occasion Reminders under the parent Relationships menu.
 - Added Outreach Campaign Engine V2 foundation.
 - Added audience filtering by country, membership, lead status, and relationship status.
 - Added rule-based personalized message generation using contact and organization fields.
@@ -62,4 +64,5 @@
 - Added `backup_history` table and Admin history view.
 - Added Auto Backup Every setting with Off, 30 min, 1 hour, and 4 hours options.
 - Added Dashboard Last Successful Backup widget.
+- Added Git Status Refresh after Backup Now, manual Refresh Git Status, transient lock-file ignoring, and explicit dirty file listing.
 - Added Opportunity Pipeline V1 with Opportunities menu, list, detail, create from Lead Detail, stage buttons, opportunity dashboard KPIs, and revenue KPIs.

@@ -122,6 +122,30 @@ Those views belong in Follow-up Queue.
 
 Follow-up Queue remains the broader operational list with filters and quick actions. Dashboard only shows the most important actions for today.
 
+## Relationships Workspace
+
+Relationship maintenance workflows are grouped under the parent menu `Relationships`.
+
+Sub-pages:
+
+- Follow-up Queue
+- Occasion Reminders
+
+Legacy navigation requests to those pages should route through the parent `Relationships` menu and preserve the intended sub-page.
+
+## Leads Workspace
+
+Lead-related workflows are grouped under the parent menu `Leads`.
+
+Sub-pages:
+
+- Outreach Campaigns
+- Quick Capture
+- Leads Import
+- Leads List
+
+Legacy navigation requests to those pages should route through the parent `Leads` menu and preserve the intended sub-page.
+
 ## Outreach Campaigns
 
 The Outreach Campaigns page supports:
@@ -228,8 +252,13 @@ It displays:
 - Last push time
 - Sync status
 - Error and suggested fix when Git reports a problem
+- Remaining uncommitted files when the working tree is dirty
 
 The Backup Now button runs `scripts/git_backup.py` and displays the script output inside the Admin page.
+
+After Backup Now completes, Admin reruns Git Health and refreshes the Git Status section from current repository state.
+
+The Refresh Git Status button manually reruns Git status, latest commit, and remote sync checks.
 
 Git backup history is stored in `backup_history`.
 
@@ -243,6 +272,11 @@ The Git backup script creates an application-level lock file and cleans stale Gi
 
 - `.git/index.lock`
 - `.git/packed-refs.lock`
+
+Git Health ignores transient runtime lock files:
+
+- `data/git_backup_running.lock`
+- `*.lock`
 
 ## Opportunities
 

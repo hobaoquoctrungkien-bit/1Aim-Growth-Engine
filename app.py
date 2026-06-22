@@ -1082,6 +1082,27 @@ def git_output(result):
     return "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
 
 
+def is_ignored_git_status_path(path_text):
+    clean_path = (path_text or "").replace("\\", "/").strip().strip('"')
+    if not clean_path:
+        return False
+    return clean_path == "data/git_backup_running.lock" or clean_path.endswith(".lock")
+
+
+def parse_git_status_lines(status_text):
+    changes = []
+    for raw_line in (status_text or "").splitlines():
+        if not raw_line.strip():
+            continue
+        path_text = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
+        if " -> " in path_text:
+            path_text = path_text.split(" -> ", 1)[1].strip()
+        if is_ignored_git_status_path(path_text):
+            continue
+        changes.append({"status": raw_line[:2].strip() or "?", "path": path_text})
+    return changes
+
+
 def detect_git_error(message, repo_path):
     lower = (message or "").lower()
     git_dir = Path(repo_path) / ".git" if repo_path else None
@@ -1113,6 +1134,7 @@ def get_git_health():
         "error_message": "",
         "suggested_fix": "",
         "uncommitted_changes": False,
+        "uncommitted_files": [],
         "ahead": 0,
         "behind": 0,
     }
@@ -1137,7 +1159,8 @@ def get_git_health():
     health["remote_url"] = remote_result.stdout.strip() if remote_result.returncode == 0 else ""
     health["last_commit_hash"] = commit_result.stdout.strip() if commit_result.returncode == 0 else ""
     health["last_commit_time"] = commit_time_result.stdout.strip() if commit_time_result.returncode == 0 else ""
-    health["uncommitted_changes"] = bool(status_result.stdout.strip()) if status_result.returncode == 0 else False
+    health["uncommitted_files"] = parse_git_status_lines(status_result.stdout) if status_result.returncode == 0 else []
+    health["uncommitted_changes"] = bool(health["uncommitted_files"])
 
     if status_result.returncode != 0:
         message = git_output(status_result)
@@ -1184,15 +1207,18 @@ def get_git_health():
         health["status"] = "Ahead of Remote"
         health["indicator"] = "Yellow"
     elif health["uncommitted_changes"]:
-        health["status"] = "Ahead of Remote"
+        health["status"] = "Uncommitted Changes"
         health["indicator"] = "Yellow"
-        health["error_message"] = "Uncommitted changes exist."
+        changed_files = ", ".join(item["path"] for item in health["uncommitted_files"][:8])
+        remaining = len(health["uncommitted_files"]) - 8
+        suffix = f" and {remaining} more" if remaining > 0 else ""
+        health["error_message"] = f"Uncommitted changes exist: {changed_files}{suffix}"
         health["suggested_fix"] = "Run Backup Now to commit and push current work."
     elif health["error_message"]:
         health["status"] = "Push Failed"
         health["indicator"] = "Red"
     else:
-        health["status"] = "Synced"
+        health["status"] = "Synced with remote"
         health["indicator"] = "Green"
 
     return health
@@ -1325,6 +1351,9 @@ def show_admin():
 
     with st.expander("Git Status", expanded=False):
         git_health = get_git_health()
+        if st.button("Refresh Git Status", key="refresh_git_status"):
+            st.rerun()
+
         git_cols = st.columns(3)
         git_cols[0].text_input("Repository Path", value=git_health["repo_path"], disabled=True)
         git_cols[1].text_input("Current Branch", value=git_health["branch"], disabled=True)
@@ -1343,6 +1372,13 @@ def show_admin():
             st.error(git_health["error_message"])
         if git_health["suggested_fix"]:
             st.info(git_health["suggested_fix"])
+        if git_health["uncommitted_files"]:
+            st.caption("Remaining uncommitted files")
+            st.dataframe(
+                pd.DataFrame(git_health["uncommitted_files"]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         auto_options = ["Off", "30 min", "1 hour", "4 hours"]
         current_auto_backup = get_app_setting("git_auto_backup_every", "Off")
@@ -1364,10 +1400,19 @@ def show_admin():
                 returncode, output = run_git_backup_now("Auto backup CRM progress")
                 st.session_state.git_backup_output = output
                 st.session_state.git_backup_returncode = returncode
+                st.session_state.git_backup_completed_at = datetime.now().isoformat(timespec="seconds")
                 if returncode == 0:
-                    st.success("Git backup succeeded.")
+                    st.session_state.git_backup_flash = "Git backup succeeded. Refreshing Git status..."
                 else:
-                    st.error("Git backup failed.")
+                    st.session_state.git_backup_flash = "Git backup failed. Refreshing Git status..."
+                st.rerun()
+
+        if st.session_state.get("git_backup_flash"):
+            if st.session_state.get("git_backup_returncode") == 0:
+                st.success(st.session_state.git_backup_flash)
+            else:
+                st.error(st.session_state.git_backup_flash)
+            st.session_state.pop("git_backup_flash", None)
 
         if st.session_state.get("git_backup_output"):
             st.caption("Backup output")
@@ -3500,7 +3545,18 @@ def show_leads_list():
 
 pending_page = st.session_state.pop("pending_page", None)
 if pending_page:
-    st.session_state.page = pending_page
+    if pending_page in ["Outreach Campaigns", "Quick Capture", "Leads Import", "Leads List"]:
+        st.session_state.page = "Leads"
+        st.session_state.leads_page = pending_page
+    elif pending_page in ["Follow-up Queue", "Occasion Reminders"]:
+        st.session_state.page = "Relationships"
+        st.session_state.relationships_page = pending_page
+    else:
+        st.session_state.page = pending_page
+if "leads_page" not in st.session_state:
+    st.session_state.leads_page = "Leads List"
+if "relationships_page" not in st.session_state:
+    st.session_state.relationships_page = "Follow-up Queue"
 
 with st.sidebar:
     st.title("1Aim")
@@ -3517,28 +3573,46 @@ with st.sidebar:
 
     page = st.radio(
         "Menu",
-        ["Dashboard", "Follow-up Queue", "Opportunities", "Outreach Campaigns", "Occasion Reminders", "Quick Capture", "Leads Import", "Leads List", "Admin"],
+        ["Dashboard", "Relationships", "Opportunities", "Leads", "Admin"],
         key="page",
     )
+    if page == "Relationships":
+        st.radio(
+            "Relationships",
+            ["Follow-up Queue", "Occasion Reminders"],
+            key="relationships_page",
+        )
+    if page == "Leads":
+        st.radio(
+            "Leads",
+            ["Outreach Campaigns", "Quick Capture", "Leads Import", "Leads List"],
+            key="leads_page",
+        )
 
 apply_global_typography(st.session_state.ui_scale)
 maybe_run_auto_git_backup()
 
 if page == "Dashboard":
     show_dashboard()
-elif page == "Follow-up Queue":
-    show_follow_up_queue()
+elif page == "Relationships":
+    relationships_page = st.session_state.get("relationships_page", "Follow-up Queue")
+    if relationships_page == "Occasion Reminders":
+        show_occasion_reminders()
+    else:
+        show_follow_up_queue()
 elif page == "Opportunities":
     show_opportunities()
-elif page == "Outreach Campaigns":
-    show_outreach_campaigns()
-elif page == "Occasion Reminders":
-    show_occasion_reminders()
-elif page == "Quick Capture":
-    show_quick_capture()
-elif page == "Leads Import":
-    show_leads_import()
+elif page == "Leads":
+    leads_page = st.session_state.get("leads_page", "Leads List")
+    if leads_page == "Outreach Campaigns":
+        show_outreach_campaigns()
+    elif leads_page == "Quick Capture":
+        show_quick_capture()
+    elif leads_page == "Leads Import":
+        show_leads_import()
+    else:
+        show_leads_list()
 elif page == "Admin":
     show_admin()
 else:
-    show_leads_list()
+    show_dashboard()

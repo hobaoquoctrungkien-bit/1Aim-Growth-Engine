@@ -65,6 +65,19 @@ Kien Ho
 
 ---
 
+Date: 2026-06-22
+
+Decision:
+Git Health ignores transient lock files and must list remaining dirty files.
+
+Reason:
+Runtime lock files can make Admin show a false warning after a successful backup. When real uncommitted changes remain, Kien needs the exact file list instead of a vague "Uncommitted changes exist" message.
+
+Approved By:
+Kien Ho
+
+---
+
 Date: 2026-06-21
 
 Decision:
@@ -241,6 +254,32 @@ Admin modules should be collapsed by default.
 
 Reason:
 Admin contains many maintenance tools. Collapsed sections keep the page calm and let Kien open only the module needed for the current task.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Lead-related workflows are grouped under a parent `Leads` menu.
+
+Reason:
+Outreach Campaigns, Quick Capture, Leads Import, and Leads List are all part of lead acquisition and lead management. Grouping them reduces sidebar clutter while preserving quick access through a focused Leads workspace.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Relationship maintenance workflows are grouped under a parent `Relationships` menu.
+
+Reason:
+Follow-up Queue and Occasion Reminders both support long-term relationship nurturing. Grouping them clarifies that relationship maintenance is a core workspace separate from lead acquisition.
 
 Approved By:
 Kien Ho
