@@ -4,3 +4,6 @@ openpyxl
 xlrd
 pillow
 pytesseract
+SQLAlchemy
+pypdf
+python-docx

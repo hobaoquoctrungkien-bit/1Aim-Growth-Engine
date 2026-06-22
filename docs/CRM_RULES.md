@@ -38,6 +38,29 @@ When an opportunity is marked Won, the linked organization becomes a Customer.
 
 Opportunity pipeline is revenue tracking. Relationship tracking remains in contacts, organizations, leads, and follow-up logic.
 
+## Inquiry Intake
+
+Inbound freight inquiries should become reviewed opportunities, not separate CRM objects.
+
+Inquiry Intake workflow:
+
+1. Paste the inquiry email and upload any customer attachments.
+2. Extract sender, company, contact, route, service, commodity, volume, and quote-preparation action.
+3. Let the user review and correct extracted fields before saving.
+4. Save uploaded files into a dated folder under `data/inquiries/`.
+5. Create an opportunity with `stage = Quote Requested`.
+6. Create an open `prepare_quote` task due on the reviewed next action date.
+7. Log an `Inquiry Received` activity with the opportunity, contact, organization, and saved file references.
+
+Rules:
+
+- Do not create a separate inquiry object in V1.
+- Do not auto-qualify strategic value beyond creating the quote-preparation task.
+- Existing organizations and contacts should be reused when matched by current CRM upsert rules.
+- Parsed inquiry details must stay editable before save.
+- TXT, EML, CSV, PDF, DOCX, XLS, and XLSX attachments should be parsed when possible.
+- Attachments are saved for quotation preparation evidence, but unsupported attachment types may be saved without text extraction.
+
 ## Strategic Direction
 
 1Aim's primary growth strategy is to build strong freight-forwarder relationships, with special focus on China network development.
@@ -71,6 +94,18 @@ High-value relationships must reappear automatically, including:
 - Customers
 - Qualified organizations
 - China strategic contacts
+
+## Leads List Lookup
+
+Leads List is for fast CRM lookup, not conversion workflow.
+
+Rules:
+
+- Do not show a separate `Open Leads` section.
+- Show `All Leads` with search, filters, sorting, and pagination.
+- Search must cover company, contact, email, phone, WeChat, WhatsApp, city, country, and membership.
+- Email status must be filterable so bounced or invalid records can be found quickly.
+- The user should be able to find a specific company or contact, such as Ronghua or Jackson, within seconds.
 
 ## Today's Action List Inclusion
 
@@ -282,3 +317,41 @@ Cleanup actions:
 - Open the linked lead for full CRM context.
 
 Corrected emails should append a contact note and create a contact update activity.
+
+## Knowledge Base Rules
+
+Knowledge Base exists for logistics, customs clearance, import/export compliance, quotation preparation, and shipment operations.
+
+It stores:
+
+- Laws
+- Decrees
+- Circulars
+- Official letters
+- Internal SOPs
+- Real-life cases
+- Customer-specific know-how
+
+Knowledge Base is not a generic legal database.
+
+AI Assistant rules:
+
+- Search Case Library first.
+- Search SOP Library second.
+- Search Legal Library third.
+- Answer from stored knowledge only.
+- Never fabricate legal references.
+- If no supporting evidence exists, answer: "Insufficient information in knowledge base."
+- External AI providers are not implemented in V1.
+- Auto-extracted legal clauses must be reviewed by a human before they become searchable.
+- Chunks with `status = pending_review` must be ignored by AI Assistant and search results.
+
+Approved operational cases should be saved back into Case Library so the system becomes smarter over time.
+
+Legal upload rules:
+
+- PDF, DOCX, and TXT uploads may auto-fill metadata and draft key clauses.
+- Auto-filled metadata is editable before save.
+- User approval is required per extracted clause.
+- Rejected or unapproved clauses must not become legal evidence.
+- Manual entry remains available when extraction fails or a document is not uploaded.

@@ -14,9 +14,10 @@ import database as database_module
 
 database_module = importlib.reload(database_module)
 
+from ui_helpers import status_badge_html
 from database import (
-    convert_lead_to_contact,
     create_inquiry,
+    create_inquiry_opportunity,
     find_captured_crm_duplicates,
     get_app_setting,
     get_backup_history,
@@ -81,7 +82,25 @@ from database import (
     update_opportunity_stage,
     OPPORTUNITY_STAGES,
 )
+from inquiry_intake import (
+    build_inquiry_notes,
+    extract_attachment_text,
+    parse_inquiry_text,
+    save_inquiry_files,
+)
 from typography import DEFAULT_UI_SCALE, UI_SCALE_OPTIONS, get_typography_tokens
+from knowledge_service import (
+    extract_uploaded_text,
+    generate_answer,
+    parse_legal_document_text,
+    save_case,
+    save_document,
+    save_sop,
+    save_uploaded_knowledge_file,
+    search_cases,
+    search_documents,
+    search_sops,
+)
 
 
 EXCEL_COLUMNS = {
@@ -189,15 +208,32 @@ def apply_global_typography(ui_scale):
             --font-size-lg: __FONT_SIZE_LG__px;
             --font-size-xl: __FONT_SIZE_XL__px;
             --font-size-xxl: __FONT_SIZE_XXL__px;
+            --color-bg: #0b1018;
+            --color-surface: #141c2a;
+            --color-surface-soft: #182233;
+            --color-control: #1c2636;
+            --color-border: #263244;
+            --color-border-strong: #3d4b63;
+            --color-text: #edf2f7;
+            --color-muted: #b7c4d8;
+            --color-accent: #2f80ed;
+            --color-accent-soft: rgba(47, 128, 237, 0.18);
         }
         .stApp {
-            background: #0b1018;
-            color: #edf2f7;
+            background: var(--color-bg);
+            color: var(--color-text);
             font-size: var(--font-size-sm);
         }
         [data-testid="stSidebar"] {
             background: #111827;
-            border-right: 1px solid #263244;
+            border-right: 1px solid var(--color-border);
+        }
+        [data-testid="stSidebar"] [role="radiogroup"] label,
+        [data-testid="stSidebar"] [data-baseweb="radio"] {
+            border-radius: 6px;
+        }
+        [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: var(--color-surface-soft);
         }
         html, body, p, li, label, textarea, input, select,
         [data-testid="stMarkdownContainer"],
@@ -212,6 +248,9 @@ def apply_global_typography(ui_scale):
             font-size: var(--font-size-sm) !important;
             line-height: 1.5 !important;
         }
+        small, [data-testid="stCaptionContainer"], .stCaption {
+            color: var(--color-muted) !important;
+        }
         h1, [data-testid="stHeadingWithActionElements"] h1 {
             font-size: var(--font-size-xxl) !important;
             line-height: 1.15 !important;
@@ -225,8 +264,8 @@ def apply_global_typography(ui_scale):
             font-size: var(--font-size-lg) !important;
         }
         [data-testid="stMetric"] {
-            background: #141c2a;
-            border: 1px solid #263244;
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
             border-radius: 8px;
             padding: 14px;
         }
@@ -240,7 +279,7 @@ def apply_global_typography(ui_scale):
             line-height: 1.2 !important;
         }
         div[data-testid="stDataFrame"] {
-            border: 1px solid #263244;
+            border: 1px solid var(--color-border);
             border-radius: 8px;
             overflow: hidden;
         }
@@ -253,16 +292,81 @@ def apply_global_typography(ui_scale):
         }
         .stButton > button {
             border-radius: 6px;
-            border: 1px solid #3d4b63;
-            background: #1c2636;
-            color: #edf2f7;
+            border: 1px solid var(--color-border-strong);
+            background: var(--color-control);
+            color: var(--color-text);
             font-size: var(--font-size-sm) !important;
             line-height: 1.35 !important;
             min-height: calc(var(--font-size-sm) * 2.5);
         }
+        .stButton > button:hover {
+            border-color: var(--color-accent);
+            background: var(--color-surface-soft);
+            color: var(--color-text);
+        }
+        .stButton > button:focus-visible,
+        a:focus-visible,
+        input:focus,
+        textarea:focus,
+        [data-baseweb="select"] > div:focus-within {
+            outline: 3px solid var(--color-accent-soft) !important;
+            outline-offset: 2px !important;
+            border-color: var(--color-accent) !important;
+            box-shadow: none !important;
+        }
+        .stButton > button:disabled,
+        .stButton > button:disabled:hover {
+            background: #171f2d;
+            border-color: var(--color-border);
+            color: #7f8ba0;
+        }
         .stButton > button[kind="primary"] {
-            background: #2f80ed;
-            border-color: #2f80ed;
+            background: var(--color-accent);
+            border-color: var(--color-accent);
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-baseweb="select"] > div,
+        [data-testid="stDateInput"] input,
+        [data-testid="stNumberInput"] input {
+            background: var(--color-control) !important;
+            border-color: var(--color-border-strong) !important;
+            color: var(--color-text) !important;
+            border-radius: 6px !important;
+        }
+        [data-testid="stTabs"] [role="tablist"] {
+            gap: 6px;
+            border-bottom: 1px solid var(--color-border);
+        }
+        [data-testid="stTabs"] [role="tab"] {
+            border-radius: 6px 6px 0 0;
+            color: var(--color-muted);
+            padding: 8px 12px;
+        }
+        [data-testid="stTabs"] [aria-selected="true"] {
+            background: var(--color-surface);
+            color: var(--color-text);
+            border: 1px solid var(--color-border);
+            border-bottom-color: var(--color-surface);
+        }
+        [data-testid="stExpander"] {
+            border: 1px solid var(--color-border);
+            border-radius: 8px;
+            background: rgba(20, 28, 42, 0.48);
+        }
+        [data-testid="stAlert"] {
+            border-radius: 8px;
+            border: 1px solid var(--color-border);
+        }
+        .ui-status-badge {
+            display: inline-flex;
+            align-items: center;
+            min-height: 24px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            border: 1px solid;
+            font-weight: 700;
+            white-space: nowrap;
         }
         .st-key-capture_organization_type div[data-baseweb="select"] > div,
         .st-key-capture_customer_status div[data-baseweb="select"] > div,
@@ -287,6 +391,13 @@ def apply_global_typography(ui_scale):
 
     st.markdown(
         stylesheet,
+        unsafe_allow_html=True,
+    )
+
+
+def status_badge(label, tone="neutral"):
+    st.markdown(
+        status_badge_html(label, tone),
         unsafe_allow_html=True,
     )
 
@@ -1432,6 +1543,200 @@ def show_admin():
             st.info("No backup history yet.")
 
     with st.expander("System Settings", expanded=False):
+        selected_ui_scale = st.radio(
+            "UI Scale",
+            UI_SCALE_OPTIONS,
+            key="admin_ui_scale",
+            index=UI_SCALE_OPTIONS.index(st.session_state.ui_scale),
+        )
+        if st.button("Save System Settings", key="save_system_settings"):
+            set_app_setting("ui_scale", selected_ui_scale)
+            st.session_state.ui_scale = selected_ui_scale
+            st.session_state.persisted_ui_scale = selected_ui_scale
+            st.success("System settings saved.")
+            st.rerun()
+
+    with st.expander("Email Settings", expanded=False):
+        email_sending_tab, email_bounce_tab, email_cleanup_tab, email_signature_tab = st.tabs(
+            [
+                "Email Sending",
+                "Email Bounce Processing",
+                "Invalid / Bounced Email Cleanup",
+                "Email Signature",
+            ]
+        )
+
+        with email_sending_tab:
+            smtp_cols = st.columns(2)
+            smtp_host = smtp_cols[0].text_input("SMTP Host", value=get_app_setting("smtp_host", ""))
+            smtp_port = smtp_cols[1].text_input("SMTP Port", value=get_app_setting("smtp_port", "587"))
+            smtp_user = smtp_cols[0].text_input("SMTP Username", value=get_app_setting("smtp_username", ""))
+            smtp_password = smtp_cols[1].text_input("SMTP Password", value=get_app_setting("smtp_password", ""), type="password")
+            smtp_from_email = smtp_cols[0].text_input("From Email", value=get_app_setting("smtp_from_email", ""))
+            smtp_from_name = smtp_cols[1].text_input("From Name", value=get_app_setting("smtp_from_name", "1Aim"))
+            current_encryption = get_app_setting("smtp_encryption", "")
+            if not current_encryption:
+                current_encryption = "TLS" if get_app_setting("smtp_use_tls", "1") == "1" else "None"
+            encryption_options = ["SSL", "TLS", "None"]
+            smtp_encryption = st.selectbox(
+                "Encryption Type",
+                encryption_options,
+                index=encryption_options.index(current_encryption) if current_encryption in encryption_options else 1,
+            )
+            debug_cols = st.columns(3)
+            debug_cols[0].metric("Host", smtp_host or "-")
+            debug_cols[1].metric("Port", smtp_port or "-")
+            debug_cols[2].metric("Encryption Type", smtp_encryption)
+            if st.button("Save Email Settings", key="save_smtp_settings"):
+                for key, value in [
+                    ("smtp_host", smtp_host),
+                    ("smtp_port", smtp_port),
+                    ("smtp_username", smtp_user),
+                    ("smtp_password", smtp_password),
+                    ("smtp_from_email", smtp_from_email),
+                    ("smtp_from_name", smtp_from_name),
+                    ("smtp_encryption", smtp_encryption),
+                    ("smtp_use_tls", "1" if smtp_encryption == "TLS" else "0"),
+                ]:
+                    set_app_setting(key, value)
+                st.success("Email settings saved.")
+                st.rerun()
+
+            test_connection_disabled = not bool(get_app_setting("smtp_host", ""))
+            if st.button("Test Connection", disabled=test_connection_disabled, key="test_smtp_connection"):
+                result = test_smtp_connection()
+                result_cols = st.columns(3)
+                result_cols[0].write(result["connection"])
+                result_cols[1].write(result["encryption"])
+                result_cols[2].write(result["authentication"])
+                if result["ok"]:
+                    st.success("SMTP connection test passed.")
+                else:
+                    st.error(result["error"])
+
+            test_cols = st.columns([2, 1])
+            test_email = test_cols[0].text_input("Test Email To", key="smtp_test_email")
+            can_send_test = is_smtp_configured() and is_valid_email(test_email)
+            if test_cols[1].button("Send Test Email", disabled=not can_send_test, key="send_smtp_test_email"):
+                ok, error_message = send_email_via_smtp(
+                    test_email.strip(),
+                    "1Aim SMTP Test",
+                    "This is a test email from 1Aim Growth Engine. SMTP sending is configured correctly.",
+                )
+                if ok:
+                    st.success("Test email sent.")
+                else:
+                    st.error(f"Test email failed: {error_message}")
+            if not is_smtp_configured():
+                st.caption("Save SMTP host and from email before sending a test email.")
+            elif test_email and not is_valid_email(test_email):
+                st.caption("Enter a valid test email address.")
+
+        with email_bounce_tab:
+            imap_cols = st.columns(4)
+            imap_cols[0].metric("IMAP Host", get_app_setting("imap_host", "mail.1aimlogistics.com"))
+            imap_cols[1].metric("IMAP Port", get_app_setting("imap_port", "993"))
+            imap_cols[2].metric("Encryption", "SSL")
+            imap_cols[3].metric("Username", get_app_setting("smtp_username", "") or "-")
+            max_bounce_messages = st.selectbox("Mailbox Scan Limit", [50, 100, 200, 500], index=1)
+            if st.button("Process Bounce Emails", key="process_bounce_emails"):
+                with st.spinner("Reading bounce emails from mailbox..."):
+                    result = process_email_bounces(max_bounce_messages)
+                st.session_state.bounce_processing_result = result
+
+            bounce_result = st.session_state.get("bounce_processing_result")
+            if bounce_result:
+                bounce_cols = st.columns(5)
+                bounce_cols[0].metric("Bounce Emails Scanned", bounce_result.get("scanned", 0))
+                bounce_cols[1].metric("Hard Bounces Found", bounce_result.get("hard_bounces", 0))
+                bounce_cols[2].metric("Soft Bounces Found", bounce_result.get("soft_bounces", 0))
+                bounce_cols[3].metric("Contacts Updated", bounce_result.get("contacts_updated", 0))
+                bounce_cols[4].metric("Unmatched", len(bounce_result.get("unmatched", [])))
+                if bounce_result.get("unmatched"):
+                    st.caption("Unmatched bounced emails")
+                    st.dataframe(pd.DataFrame({"Email": bounce_result["unmatched"]}), use_container_width=True, hide_index=True)
+                if bounce_result.get("errors"):
+                    st.error(" | ".join(bounce_result["errors"]))
+
+        with email_cleanup_tab:
+            cleanup_filters = st.columns([1, 2, 1])
+            cleanup_status = cleanup_filters[0].selectbox("Email Status Filter", ["All", "Bounced", "Invalid"], key="email_cleanup_status")
+            cleanup_search = cleanup_filters[1].text_input("Search Contact / Company / Email", key="email_cleanup_search")
+            cleanup_limit = cleanup_filters[2].selectbox("Rows", [25, 50, 100, 200], index=1, key="email_cleanup_limit")
+            bad_email_rows = get_invalid_email_contacts(cleanup_status, cleanup_search, cleanup_limit)
+            status_counts = {
+                "Bounced": sum(1 for row in bad_email_rows if row.get("email_status") == "Bounced"),
+                "Invalid": sum(1 for row in bad_email_rows if row.get("email_status") == "Invalid"),
+            }
+            cleanup_metric_cols = st.columns(3)
+            cleanup_metric_cols[0].metric("Showing", len(bad_email_rows))
+            cleanup_metric_cols[1].metric("Bounced", status_counts["Bounced"])
+            cleanup_metric_cols[2].metric("Invalid", status_counts["Invalid"])
+            if not bad_email_rows:
+                st.info("No invalid or bounced emails found for this filter.")
+            for row in bad_email_rows:
+                title = f"{row.get('contact_name') or row.get('full_name') or 'No contact'} - {row.get('email') or 'No email'}"
+                with st.expander(title):
+                    meta_cols = st.columns(4)
+                    meta_cols[0].write(row.get("organization_name") or "-")
+                    meta_cols[1].write(row.get("country") or "-")
+                    meta_cols[2].write(row.get("city") or "-")
+                    meta_cols[3].write(row.get("email_status") or "Unknown")
+                    corrected_email = st.text_input(
+                        "Corrected Email",
+                        value=row.get("email") or "",
+                        key=f"cleanup_email_{row['contact_id']}",
+                    )
+                    action_cols = st.columns(5)
+                    if action_cols[0].button("Save as Valid", key=f"cleanup_save_valid_{row['contact_id']}"):
+                        if is_valid_email(corrected_email):
+                            update_contact_email_address(row["contact_id"], corrected_email.strip(), "Valid", "Email cleanup")
+                            st.success("Email corrected and marked Valid.")
+                            st.rerun()
+                        else:
+                            st.error("Enter a valid email before saving.")
+                    if action_cols[1].button("Mark Valid", key=f"cleanup_mark_valid_{row['contact_id']}"):
+                        update_contact_email_status(row["contact_id"], "Valid", "Email cleanup")
+                        st.rerun()
+                    if action_cols[2].button("Mark Invalid", key=f"cleanup_mark_invalid_{row['contact_id']}"):
+                        update_contact_email_status(row["contact_id"], "Invalid", "Email cleanup")
+                        st.rerun()
+                    if action_cols[3].button("Mark Bounced", key=f"cleanup_mark_bounced_{row['contact_id']}"):
+                        update_contact_email_status(row["contact_id"], "Bounced", "Email cleanup")
+                        st.rerun()
+                    if action_cols[4].button("Open Lead", key=f"cleanup_open_lead_{row['contact_id']}", disabled=not row.get("lead_id")):
+                        st.session_state.selected_lead_id = row["lead_id"]
+                        st.session_state.pending_page = "Leads List"
+                        st.rerun()
+
+        with email_signature_tab:
+            sig_cols = st.columns(2)
+            signature_name = sig_cols[0].text_input("Signature Name", value=get_app_setting("signature_name", "Kien Ho"))
+            signature_title = sig_cols[1].text_input("Signature Title", value=get_app_setting("signature_title", "CEO"))
+            signature_company = sig_cols[0].text_input("Signature Company", value=get_app_setting("signature_company", "1Aim Logistics"))
+            signature_phone = sig_cols[1].text_input("Signature Phone", value=get_app_setting("signature_phone", ""))
+            signature_email = sig_cols[0].text_input("Signature Email", value=get_app_setting("signature_email", ""))
+            signature_website = sig_cols[1].text_input("Signature Website", value=get_app_setting("signature_website", ""))
+            signature_wechat = sig_cols[0].text_input("Signature WeChat", value=get_app_setting("signature_wechat", ""))
+            signature_whatsapp = sig_cols[1].text_input("Signature WhatsApp", value=get_app_setting("signature_whatsapp", ""))
+            signature_html = st.text_area("HTML Signature", value=get_app_setting("signature_html", ""), height=120)
+            if st.button("Save Email Signature", key="save_email_signature"):
+                for key, value in [
+                    ("signature_name", signature_name),
+                    ("signature_title", signature_title),
+                    ("signature_company", signature_company),
+                    ("signature_phone", signature_phone),
+                    ("signature_email", signature_email),
+                    ("signature_website", signature_website),
+                    ("signature_wechat", signature_wechat),
+                    ("signature_whatsapp", signature_whatsapp),
+                    ("signature_html", signature_html),
+                ]:
+                    set_app_setting(key, value)
+                st.success("Email signature saved.")
+                st.rerun()
+
+    with st.expander("CRM Activation", expanded=False):
         capacity_options = [10, 20, 30, 50]
         current_capacity = get_daily_outreach_capacity()
         selected_capacity = st.selectbox(
@@ -1444,177 +1749,6 @@ def show_admin():
             st.success("Daily outreach capacity saved.")
             st.rerun()
 
-    with st.expander("Email Sending", expanded=False):
-        smtp_cols = st.columns(2)
-        smtp_host = smtp_cols[0].text_input("SMTP Host", value=get_app_setting("smtp_host", ""))
-        smtp_port = smtp_cols[1].text_input("SMTP Port", value=get_app_setting("smtp_port", "587"))
-        smtp_user = smtp_cols[0].text_input("SMTP Username", value=get_app_setting("smtp_username", ""))
-        smtp_password = smtp_cols[1].text_input("SMTP Password", value=get_app_setting("smtp_password", ""), type="password")
-        smtp_from_email = smtp_cols[0].text_input("From Email", value=get_app_setting("smtp_from_email", ""))
-        smtp_from_name = smtp_cols[1].text_input("From Name", value=get_app_setting("smtp_from_name", "1Aim"))
-        current_encryption = get_app_setting("smtp_encryption", "")
-        if not current_encryption:
-            current_encryption = "TLS" if get_app_setting("smtp_use_tls", "1") == "1" else "None"
-        encryption_options = ["SSL", "TLS", "None"]
-        smtp_encryption = st.selectbox(
-            "Encryption Type",
-            encryption_options,
-            index=encryption_options.index(current_encryption) if current_encryption in encryption_options else 1,
-        )
-        debug_cols = st.columns(3)
-        debug_cols[0].metric("Host", smtp_host or "-")
-        debug_cols[1].metric("Port", smtp_port or "-")
-        debug_cols[2].metric("Encryption Type", smtp_encryption)
-        if st.button("Save Email Settings", key="save_smtp_settings"):
-            for key, value in [
-                ("smtp_host", smtp_host),
-                ("smtp_port", smtp_port),
-                ("smtp_username", smtp_user),
-                ("smtp_password", smtp_password),
-                ("smtp_from_email", smtp_from_email),
-                ("smtp_from_name", smtp_from_name),
-                ("smtp_encryption", smtp_encryption),
-                ("smtp_use_tls", "1" if smtp_encryption == "TLS" else "0"),
-            ]:
-                set_app_setting(key, value)
-            st.success("Email settings saved.")
-            st.rerun()
-
-        test_connection_disabled = not bool(get_app_setting("smtp_host", ""))
-        if st.button("Test Connection", disabled=test_connection_disabled, key="test_smtp_connection"):
-            result = test_smtp_connection()
-            result_cols = st.columns(3)
-            result_cols[0].write(result["connection"])
-            result_cols[1].write(result["encryption"])
-            result_cols[2].write(result["authentication"])
-            if result["ok"]:
-                st.success("SMTP connection test passed.")
-            else:
-                st.error(result["error"])
-
-        test_cols = st.columns([2, 1])
-        test_email = test_cols[0].text_input("Test Email To", key="smtp_test_email")
-        can_send_test = is_smtp_configured() and is_valid_email(test_email)
-        if test_cols[1].button("Send Test Email", disabled=not can_send_test, key="send_smtp_test_email"):
-            ok, error_message = send_email_via_smtp(
-                test_email.strip(),
-                "1Aim SMTP Test",
-                "This is a test email from 1Aim Growth Engine. SMTP sending is configured correctly.",
-            )
-            if ok:
-                st.success("Test email sent.")
-            else:
-                st.error(f"Test email failed: {error_message}")
-        if not is_smtp_configured():
-            st.caption("Save SMTP host and from email before sending a test email.")
-        elif test_email and not is_valid_email(test_email):
-            st.caption("Enter a valid test email address.")
-
-    with st.expander("Email Bounce Processing", expanded=False):
-        imap_cols = st.columns(4)
-        imap_cols[0].metric("IMAP Host", get_app_setting("imap_host", "mail.1aimlogistics.com"))
-        imap_cols[1].metric("IMAP Port", get_app_setting("imap_port", "993"))
-        imap_cols[2].metric("Encryption", "SSL")
-        imap_cols[3].metric("Username", get_app_setting("smtp_username", "") or "-")
-        max_bounce_messages = st.selectbox("Mailbox Scan Limit", [50, 100, 200, 500], index=1)
-        if st.button("Process Bounce Emails", key="process_bounce_emails"):
-            with st.spinner("Reading bounce emails from mailbox..."):
-                result = process_email_bounces(max_bounce_messages)
-            st.session_state.bounce_processing_result = result
-
-        bounce_result = st.session_state.get("bounce_processing_result")
-        if bounce_result:
-            bounce_cols = st.columns(5)
-            bounce_cols[0].metric("Bounce Emails Scanned", bounce_result.get("scanned", 0))
-            bounce_cols[1].metric("Hard Bounces Found", bounce_result.get("hard_bounces", 0))
-            bounce_cols[2].metric("Soft Bounces Found", bounce_result.get("soft_bounces", 0))
-            bounce_cols[3].metric("Contacts Updated", bounce_result.get("contacts_updated", 0))
-            bounce_cols[4].metric("Unmatched", len(bounce_result.get("unmatched", [])))
-            if bounce_result.get("unmatched"):
-                st.caption("Unmatched bounced emails")
-                st.dataframe(pd.DataFrame({"Email": bounce_result["unmatched"]}), use_container_width=True, hide_index=True)
-            if bounce_result.get("errors"):
-                st.error(" | ".join(bounce_result["errors"]))
-
-    with st.expander("Invalid / Bounced Email Cleanup", expanded=False):
-        cleanup_filters = st.columns([1, 2, 1])
-        cleanup_status = cleanup_filters[0].selectbox("Email Status Filter", ["All", "Bounced", "Invalid"], key="email_cleanup_status")
-        cleanup_search = cleanup_filters[1].text_input("Search Contact / Company / Email", key="email_cleanup_search")
-        cleanup_limit = cleanup_filters[2].selectbox("Rows", [25, 50, 100, 200], index=1, key="email_cleanup_limit")
-        bad_email_rows = get_invalid_email_contacts(cleanup_status, cleanup_search, cleanup_limit)
-        status_counts = {
-            "Bounced": sum(1 for row in bad_email_rows if row.get("email_status") == "Bounced"),
-            "Invalid": sum(1 for row in bad_email_rows if row.get("email_status") == "Invalid"),
-        }
-        cleanup_metric_cols = st.columns(3)
-        cleanup_metric_cols[0].metric("Showing", len(bad_email_rows))
-        cleanup_metric_cols[1].metric("Bounced", status_counts["Bounced"])
-        cleanup_metric_cols[2].metric("Invalid", status_counts["Invalid"])
-        if not bad_email_rows:
-            st.info("No invalid or bounced emails found for this filter.")
-        for row in bad_email_rows:
-            title = f"{row.get('contact_name') or row.get('full_name') or 'No contact'} - {row.get('email') or 'No email'}"
-            with st.expander(title):
-                meta_cols = st.columns(4)
-                meta_cols[0].write(row.get("organization_name") or "-")
-                meta_cols[1].write(row.get("country") or "-")
-                meta_cols[2].write(row.get("city") or "-")
-                meta_cols[3].write(row.get("email_status") or "Unknown")
-                corrected_email = st.text_input(
-                    "Corrected Email",
-                    value=row.get("email") or "",
-                    key=f"cleanup_email_{row['contact_id']}",
-                )
-                action_cols = st.columns(5)
-                if action_cols[0].button("Save as Valid", key=f"cleanup_save_valid_{row['contact_id']}"):
-                    if is_valid_email(corrected_email):
-                        update_contact_email_address(row["contact_id"], corrected_email.strip(), "Valid", "Email cleanup")
-                        st.success("Email corrected and marked Valid.")
-                        st.rerun()
-                    else:
-                        st.error("Enter a valid email before saving.")
-                if action_cols[1].button("Mark Valid", key=f"cleanup_mark_valid_{row['contact_id']}"):
-                    update_contact_email_status(row["contact_id"], "Valid", "Email cleanup")
-                    st.rerun()
-                if action_cols[2].button("Mark Invalid", key=f"cleanup_mark_invalid_{row['contact_id']}"):
-                    update_contact_email_status(row["contact_id"], "Invalid", "Email cleanup")
-                    st.rerun()
-                if action_cols[3].button("Mark Bounced", key=f"cleanup_mark_bounced_{row['contact_id']}"):
-                    update_contact_email_status(row["contact_id"], "Bounced", "Email cleanup")
-                    st.rerun()
-                if action_cols[4].button("Open Lead", key=f"cleanup_open_lead_{row['contact_id']}", disabled=not row.get("lead_id")):
-                    st.session_state.selected_lead_id = row["lead_id"]
-                    st.session_state.pending_page = "Leads List"
-                    st.rerun()
-
-    with st.expander("Email Signature", expanded=False):
-        sig_cols = st.columns(2)
-        signature_name = sig_cols[0].text_input("Signature Name", value=get_app_setting("signature_name", "Kien Ho"))
-        signature_title = sig_cols[1].text_input("Signature Title", value=get_app_setting("signature_title", "CEO"))
-        signature_company = sig_cols[0].text_input("Signature Company", value=get_app_setting("signature_company", "1Aim Logistics"))
-        signature_phone = sig_cols[1].text_input("Signature Phone", value=get_app_setting("signature_phone", ""))
-        signature_email = sig_cols[0].text_input("Signature Email", value=get_app_setting("signature_email", ""))
-        signature_website = sig_cols[1].text_input("Signature Website", value=get_app_setting("signature_website", ""))
-        signature_wechat = sig_cols[0].text_input("Signature WeChat", value=get_app_setting("signature_wechat", ""))
-        signature_whatsapp = sig_cols[1].text_input("Signature WhatsApp", value=get_app_setting("signature_whatsapp", ""))
-        signature_html = st.text_area("HTML Signature", value=get_app_setting("signature_html", ""), height=120)
-        if st.button("Save Email Signature", key="save_email_signature"):
-            for key, value in [
-                ("signature_name", signature_name),
-                ("signature_title", signature_title),
-                ("signature_company", signature_company),
-                ("signature_phone", signature_phone),
-                ("signature_email", signature_email),
-                ("signature_website", signature_website),
-                ("signature_wechat", signature_wechat),
-                ("signature_whatsapp", signature_whatsapp),
-                ("signature_html", signature_html),
-            ]:
-                set_app_setting(key, value)
-            st.success("Email signature saved.")
-            st.rerun()
-
-    with st.expander("CRM Activation", expanded=False):
         st.caption("Initialize missing next actions and spread them across the next 30 days.")
         if st.button("Activate Missing Lead Follow-ups", key="admin_activate_followups"):
             result = initialize_missing_lead_followups()
@@ -2367,6 +2501,113 @@ def money_display(value):
         return f"${float(value or 0):,.0f}"
     except (TypeError, ValueError):
         return "$0"
+
+
+def show_inquiry_intake():
+    st.title("Inquiry Intake")
+    st.caption("Parse inbound freight inquiries, save attachments, and create a reviewed opportunity.")
+
+    raw_email = st.text_area(
+        "Inquiry Email",
+        key="inquiry_raw_email",
+        height=260,
+        placeholder="Paste the customer or agent inquiry email here.",
+    )
+    uploaded_files = st.file_uploader(
+        "Attachments",
+        type=["pdf", "docx", "txt", "csv", "eml", "xlsx", "xls", "png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key="inquiry_attachments",
+        help="Text is extracted from PDF, DOCX, TXT, CSV, and EML files. All uploaded files are saved with the inquiry.",
+    )
+
+    parse_disabled = not raw_email.strip() and not uploaded_files
+    if st.button("Extract Inquiry", type="primary", disabled=parse_disabled, key="extract_inquiry"):
+        attachment_items = []
+        attachment_texts = []
+        for uploaded_file in uploaded_files or []:
+            content = uploaded_file.getvalue()
+            attachment_items.append({"filename": uploaded_file.name, "content": content})
+            attachment_text = extract_attachment_text(uploaded_file.name, content)
+            if attachment_text:
+                attachment_texts.append({"filename": uploaded_file.name, "text": attachment_text})
+        st.session_state.inquiry_attachment_items = attachment_items
+        st.session_state.inquiry_parsed = parse_inquiry_text(raw_email, attachment_texts)
+        st.success("Inquiry fields extracted. Review before saving.")
+
+    parsed = st.session_state.get("inquiry_parsed")
+    if not parsed:
+        st.info("Paste an inquiry email or upload attachments, then extract the inquiry.")
+        return
+
+    st.subheader("Review Extracted Inquiry")
+    identity_cols = st.columns(3)
+    company_name = identity_cols[0].text_input("Organization", value=parsed.get("company_name") or "", key="inquiry_company")
+    contact_person = identity_cols[1].text_input("Contact", value=parsed.get("contact_person") or "", key="inquiry_contact")
+    email = identity_cols[2].text_input("Email", value=parsed.get("email") or "", key="inquiry_email")
+
+    location_cols = st.columns(3)
+    phone = location_cols[0].text_input("Phone", value=parsed.get("phone") or "", key="inquiry_phone")
+    country = location_cols[1].text_input("Country", value=parsed.get("country") or "", key="inquiry_country")
+    city = location_cols[2].text_input("City", value=parsed.get("city") or "", key="inquiry_city")
+
+    opportunity_name = st.text_input(
+        "Opportunity Name",
+        value=parsed.get("opportunity_name") or "Inbound Inquiry",
+        key="inquiry_opportunity_name",
+    )
+    freight_cols = st.columns(4)
+    trade_lane = freight_cols[0].text_input("Trade Lane", value=parsed.get("trade_lane") or "", key="inquiry_lane")
+    service_type = freight_cols[1].text_input("Service Type", value=parsed.get("service_type") or "", key="inquiry_service")
+    mode = freight_cols[2].text_input("Mode", value=parsed.get("mode") or "", key="inquiry_mode")
+    volume = freight_cols[3].text_input("Volume", value=parsed.get("volume") or "", key="inquiry_volume")
+
+    detail_cols = st.columns(3)
+    commodity = detail_cols[0].text_input("Commodity", value=parsed.get("commodity") or "", key="inquiry_commodity")
+    next_action = detail_cols[1].text_input("Next Action", value=parsed.get("next_action") or "Prepare quotation", key="inquiry_next_action")
+    next_action_date = detail_cols[2].text_input("Next Action Date", value=parsed.get("next_action_date") or "", key="inquiry_next_action_date")
+
+    with st.expander("Parsed Source Text", expanded=False):
+        st.text_area("Original Email", value=parsed.get("raw_text") or "", height=180, key="inquiry_review_raw_text")
+        if parsed.get("attachment_text"):
+            st.text_area("Attachment Text", value=parsed.get("attachment_text") or "", height=180, key="inquiry_review_attachment_text")
+
+    save_disabled = not opportunity_name.strip()
+    if st.button("Create Opportunity From Inquiry", type="primary", disabled=save_disabled, key="save_inquiry_opportunity"):
+        attachment_items = st.session_state.get("inquiry_attachment_items", [])
+        attachment_folder, saved_files = save_inquiry_files(opportunity_name, attachment_items)
+        reviewed_record = {
+            "opportunity_name": opportunity_name,
+            "subject": parsed.get("subject"),
+            "company_name": company_name,
+            "contact_person": contact_person,
+            "email": email,
+            "phone": phone,
+            "country": country,
+            "city": city,
+            "trade_lane": trade_lane,
+            "service_type": service_type,
+            "mode": mode,
+            "volume": volume,
+            "commodity": commodity,
+            "stage": "Quote Requested",
+            "inquiry_date": parsed.get("inquiry_date"),
+            "next_action": next_action,
+            "next_action_date": next_action_date,
+            "raw_text": parsed.get("raw_text"),
+            "attachment_text": parsed.get("attachment_text"),
+            "attachment_folder": attachment_folder,
+            "attachment_files": "\n".join(saved_files),
+        }
+        reviewed_record["notes"] = build_inquiry_notes(reviewed_record, saved_files)
+        result = create_inquiry_opportunity(reviewed_record)
+        st.session_state.selected_opportunity_id = result["opportunity_id"]
+        st.session_state.inquiry_last_result = result
+        st.session_state.pop("inquiry_parsed", None)
+        st.session_state.pop("inquiry_attachment_items", None)
+        st.success("Opportunity created and inquiry files saved.")
+        st.session_state.pending_page = "Opportunities"
+        st.rerun()
 
 
 def show_opportunities():
@@ -3477,111 +3718,526 @@ def show_leads_list():
         except (IndexError, KeyError):
             return default
 
-    st.subheader("Open Lead")
-    for lead in leads[:25]:
-        row_cols = st.columns([1, 3, 3, 2, 2])
-        row_cols[0].write(f"#{lead_value(lead, 'id')}")
-        row_cols[1].write(lead_value(lead, "contact_person") or "No contact name")
-        row_cols[2].write(lead_value(lead, "company_name") or "No organization")
-        row_cols[3].write(lead_value(lead, "lead_status", "New"))
-        if row_cols[4].button("Open", key=f"open_lead_{lead_value(lead, 'id')}"):
+    def unique_options(key):
+        return sorted({str(lead_value(lead, key)).strip() for lead in leads if str(lead_value(lead, key)).strip()})
+
+    filter_defaults = {
+        "lead_filter_country": [],
+        "lead_filter_city": [],
+        "lead_filter_membership": [],
+        "lead_filter_lead_status": [],
+        "lead_filter_customer_status": [],
+        "lead_filter_relationship_status": [],
+        "lead_filter_email_status": [],
+    }
+    for key, value in filter_defaults.items():
+        st.session_state.setdefault(key, value)
+    st.session_state.setdefault("leads_list_page_number", 1)
+
+    st.subheader("All Leads")
+
+    quick_country_cols = st.columns(4)
+    for col, country_name in zip(quick_country_cols, ["China", "USA", "India", "Vietnam"]):
+        if col.button(country_name, key=f"quick_country_{country_name}"):
+            st.session_state.lead_filter_country = [country_name]
+            st.session_state.leads_list_page_number = 1
+            st.rerun()
+
+    quick_status_cols = st.columns(4)
+    for col, status_name in zip(quick_status_cols, ["New", "Contacted", "Qualified", "Converted"]):
+        if col.button(status_name, key=f"quick_status_{status_name}"):
+            st.session_state.lead_filter_lead_status = [status_name]
+            st.session_state.leads_list_page_number = 1
+            st.rerun()
+
+    quick_membership_cols = st.columns(4)
+    for col, membership_name in zip(quick_membership_cols[:3], ["OLO", "WCA", "JCTrans"]):
+        if col.button(membership_name, key=f"quick_membership_{membership_name}"):
+            st.session_state.lead_filter_membership = [membership_name]
+            st.session_state.leads_list_page_number = 1
+            st.rerun()
+    if quick_membership_cols[3].button("Clear Filters", key="clear_lead_filters"):
+        for key in filter_defaults:
+            st.session_state[key] = []
+        st.session_state.leads_search = ""
+        st.session_state.leads_list_page_number = 1
+        st.rerun()
+
+    search_text = st.text_input("Search Leads", key="leads_search", placeholder="Ronghua, Jackson, Shenzhen, WCA")
+
+    filter_cols = st.columns(3)
+    country_filter = filter_cols[0].multiselect("Country", unique_options("country"), key="lead_filter_country")
+    city_filter = filter_cols[1].multiselect("City", unique_options("city"), key="lead_filter_city")
+    membership_filter = filter_cols[2].multiselect("Membership", unique_options("membership"), key="lead_filter_membership")
+
+    filter_cols2 = st.columns(4)
+    lead_status_filter = filter_cols2[0].multiselect("Lead Status", unique_options("lead_status"), key="lead_filter_lead_status")
+    customer_status_filter = filter_cols2[1].multiselect("Customer Status", unique_options("customer_status"), key="lead_filter_customer_status")
+    relationship_status_filter = filter_cols2[2].multiselect("Relationship Status", unique_options("relationship_status"), key="lead_filter_relationship_status")
+    email_status_filter = filter_cols2[3].multiselect("Email Status", ["Valid", "Unknown", "Bounced", "Invalid"], key="lead_filter_email_status")
+
+    sort_by = st.selectbox(
+        "Sort by",
+        ["Priority Score", "Created Date", "Last Contacted", "Next Follow-up", "Company", "Country"],
+        key="leads_sort_by",
+    )
+
+    def contains_any(value, selected_values):
+        if not selected_values:
+            return True
+        value_text = str(value or "").strip().lower()
+        return any(str(selected).strip().lower() == value_text for selected in selected_values)
+
+    def membership_matches(value, selected_values):
+        if not selected_values:
+            return True
+        value_text = str(value or "").lower()
+        return any(str(selected).lower() in value_text for selected in selected_values)
+
+    search_lower = (search_text or "").strip().lower()
+    search_fields = ["company_name", "contact_person", "email", "phone", "wechat", "whatsapp", "city", "country", "membership"]
+
+    filtered_leads = []
+    for lead in leads:
+        if search_lower:
+            haystack = " ".join(str(lead_value(lead, field) or "") for field in search_fields).lower()
+            if search_lower not in haystack:
+                continue
+        if not contains_any(lead_value(lead, "country"), country_filter):
+            continue
+        if not contains_any(lead_value(lead, "city"), city_filter):
+            continue
+        if not membership_matches(lead_value(lead, "membership"), membership_filter):
+            continue
+        if not contains_any(lead_value(lead, "lead_status", "New"), lead_status_filter):
+            continue
+        if not contains_any(lead_value(lead, "customer_status", "Prospect"), customer_status_filter):
+            continue
+        if not contains_any(lead_value(lead, "relationship_status", "New"), relationship_status_filter):
+            continue
+        if not contains_any(lead_value(lead, "email_status", "Unknown"), email_status_filter):
+            continue
+        filtered_leads.append(lead)
+
+    def date_sort_value(value, reverse=False):
+        text = str(value or "")
+        if not text:
+            return "0000-00-00" if reverse else "9999-99-99"
+        return text
+
+    if sort_by == "Priority Score":
+        filtered_leads.sort(key=lambda lead: int(lead_value(lead, "priority_score", 0) or 0), reverse=True)
+    elif sort_by == "Created Date":
+        filtered_leads.sort(key=lambda lead: date_sort_value(lead_value(lead, "created_at"), reverse=True), reverse=True)
+    elif sort_by == "Last Contacted":
+        filtered_leads.sort(key=lambda lead: date_sort_value(lead_value(lead, "last_contacted_at"), reverse=True), reverse=True)
+    elif sort_by == "Next Follow-up":
+        filtered_leads.sort(key=lambda lead: date_sort_value(lead_value(lead, "next_follow_up_at") or lead_value(lead, "next_action_date")))
+    elif sort_by == "Company":
+        filtered_leads.sort(key=lambda lead: str(lead_value(lead, "company_name") or "").lower())
+    elif sort_by == "Country":
+        filtered_leads.sort(key=lambda lead: str(lead_value(lead, "country") or "").lower())
+
+    total_count = len(leads)
+    filtered_count = len(filtered_leads)
+    st.caption(f"Showing {filtered_count} of {total_count} leads")
+
+    page_size = 25
+    total_pages = max(1, (filtered_count + page_size - 1) // page_size)
+    st.session_state.leads_list_page_number = min(max(1, int(st.session_state.leads_list_page_number)), total_pages)
+    page_number = st.session_state.leads_list_page_number
+    start = (page_number - 1) * page_size
+    end = start + page_size
+    page_rows = filtered_leads[start:end]
+
+    nav_cols = st.columns([1, 1, 4])
+    if nav_cols[0].button("Previous", disabled=page_number <= 1, key="leads_prev_page"):
+        st.session_state.leads_list_page_number = max(1, page_number - 1)
+        st.rerun()
+    if nav_cols[1].button("Next", disabled=page_number >= total_pages, key="leads_next_page"):
+        st.session_state.leads_list_page_number = min(total_pages, page_number + 1)
+        st.rerun()
+    nav_cols[2].write(f"Page {page_number} of {total_pages}")
+
+    header = st.columns([1, 2, 3, 1.5, 1.5, 1.5, 1.6, 1.4, 2, 1])
+    for col, label in zip(header, ["Priority", "Contact", "Company", "Country", "Membership", "Lead Status", "Relationship", "Email Status", "Next Follow-up", "Action"]):
+        col.write(label)
+
+    if not page_rows:
+        st.info("No leads match the current search and filters.")
+        return
+
+    for lead in page_rows:
+        row_cols = st.columns([1, 2, 3, 1.5, 1.5, 1.5, 1.6, 1.4, 2, 1])
+        row_cols[0].write(int(lead_value(lead, "priority_score", 0) or 0))
+        row_cols[1].write(lead_value(lead, "contact_person") or "No contact")
+        row_cols[2].write(lead_value(lead, "company_name") or "No company")
+        row_cols[3].write(lead_value(lead, "country") or "-")
+        row_cols[4].write(lead_value(lead, "membership") or "-")
+        row_cols[5].write(lead_value(lead, "lead_status", "New"))
+        row_cols[6].write(lead_value(lead, "relationship_status", "New") or "New")
+        email_status = lead_value(lead, "email_status", "Unknown") or "Unknown"
+        email_tone = "red" if email_status in ["Invalid", "Bounced"] else "green" if email_status == "Valid" else "neutral"
+        with row_cols[7]:
+            status_badge(email_status, email_tone)
+        row_cols[8].write(lead_value(lead, "next_follow_up_at") or lead_value(lead, "next_action_date") or "-")
+        if row_cols[9].button("Open", key=f"open_lead_{lead_value(lead, 'id')}"):
             st.session_state.selected_lead_id = lead_value(lead, "id")
             st.rerun()
 
-    st.divider()
-    st.subheader("All Leads")
 
-    dataframe = pd.DataFrame(
-        [
-            {
-                "Company": lead_value(lead, "company_name"),
-                "Contact Person": lead_value(lead, "contact_person"),
-                "Country": lead_value(lead, "country"),
-                "City": lead_value(lead, "city"),
-                "Job Title": lead_value(lead, "job_title"),
-                "Email": lead_value(lead, "email"),
-                "WeChat": lead_value(lead, "wechat"),
-                "Whatsapp": lead_value(lead, "whatsapp"),
-                "Membership": lead_value(lead, "membership"),
-                "Source": lead_value(lead, "source"),
-                "Campaign": lead_value(lead, "campaign"),
-                "Lead Status": lead_value(lead, "lead_status", "New"),
-                "Customer Status": lead_value(lead, "customer_status", "Prospect"),
-                "Relationship": lead_value(lead, "relationship_status", "New"),
-                "Next Action": lead_value(lead, "next_action"),
-                "Next Action Date": lead_value(lead, "next_action_date"),
-                "Last Contacted": lead_value(lead, "last_contacted_at"),
-            }
-            for lead in leads
-        ]
-    )
+def show_legal_library():
+    st.title("Legal Library")
+    st.caption("Store laws, decrees, circulars, official letters, and compliance references for logistics operations.")
 
-    st.dataframe(
-        dataframe,
-        use_container_width=True,
-        hide_index=True,
-    )
+    with st.expander("Add Legal Document", expanded=False):
+        st.subheader("Step 1: Upload file")
+        uploaded_file = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf", "docx", "txt"], key="kb_legal_upload")
 
-    st.subheader("Convert Lead")
-    open_leads = [
-        lead for lead in leads
-        if lead_value(lead, "lead_status", "New") != "Converted"
-    ]
-
-    if not open_leads:
-        st.info("All listed leads are already converted.")
-        return
-
-    lead_options = {
-        f"#{lead_value(lead, 'id')} - {lead_value(lead, 'company_name') or 'Unknown company'} - {lead_value(lead, 'contact_person') or lead_value(lead, 'email') or lead_value(lead, 'wechat') or lead_value(lead, 'whatsapp') or 'No contact name'}": lead_value(lead, "id")
-        for lead in open_leads
-    }
-    selected_label = st.selectbox(
-        "Lead",
-        list(lead_options.keys()),
-    )
-
-    if st.button("Convert Lead", type="primary"):
-        contact_id = convert_lead_to_contact(lead_options[selected_label])
-        if contact_id:
-            st.success("Lead converted.")
+        parse_cols = st.columns([1, 1, 4])
+        if parse_cols[0].button("Extract & Auto-fill", key="kb_extract_doc", disabled=not uploaded_file):
+            try:
+                uploaded_text = extract_uploaded_text(uploaded_file)
+                parsed = parse_legal_document_text(uploaded_text, uploaded_file.name)
+                st.session_state.kb_doc_parsed = parsed
+                st.session_state.kb_doc_chunks = parsed.get("chunks", [])
+                st.session_state.kb_doc_title = parsed.get("title", "")
+                st.session_state.kb_doc_no = parsed.get("document_no", "")
+                st.session_state.kb_doc_type = parsed.get("document_type", "Other")
+                st.session_state.kb_doc_authority = parsed.get("issuing_authority", "")
+                st.session_state.kb_doc_issue = parsed.get("issue_date", "")
+                st.session_state.kb_doc_effective = parsed.get("effective_date", "")
+                st.session_state.kb_doc_expiry = parsed.get("expiry_date", "")
+                st.session_state.kb_doc_status = parsed.get("status", "Active")
+                st.session_state.kb_doc_category = parsed.get("category", "")
+                st.session_state.kb_doc_source = parsed.get("source_url", "")
+                st.session_state.kb_doc_tags = ", ".join(parsed.get("tags", []))
+                st.session_state.kb_doc_summary = parsed.get("summary", "")
+                st.session_state.kb_doc_chunk = parsed.get("content", "")
+                st.session_state.kb_doc_article = parsed.get("article_no", "")
+                st.session_state.kb_doc_clause = parsed.get("clause_no", "")
+                st.session_state.kb_doc_keywords = parsed.get("keywords", "")
+                st.session_state.kb_doc_extract_error = ""
+                st.success("Parsed information is ready for review.")
+            except Exception as exc:
+                st.session_state.kb_doc_extract_error = str(exc)
+                st.error(f"Extraction failed: {exc}")
             st.rerun()
+
+        if parse_cols[1].button("Clear Draft", key="kb_clear_doc_draft"):
+            for key in list(st.session_state.keys()):
+                if key.startswith("kb_doc_"):
+                    del st.session_state[key]
+            st.rerun()
+
+        if st.session_state.get("kb_doc_extract_error"):
+            st.warning(st.session_state.kb_doc_extract_error)
+
+        st.subheader("Step 2: Parsed Information Preview")
+        st.caption("Review and edit the extracted metadata before saving. Manual entry still works without upload.")
+        form_cols = st.columns(3)
+        title = form_cols[0].text_input("Title", key="kb_doc_title")
+        document_no = form_cols[1].text_input("Document No.", key="kb_doc_no")
+        document_type_options = ["Luật", "Nghị định", "Thông tư", "Quyết định", "Công văn", "Official Letter", "Law", "Decree", "Circular", "Other"]
+        if st.session_state.get("kb_doc_type") not in document_type_options:
+            st.session_state.kb_doc_type = "Other"
+        document_type = form_cols[2].selectbox(
+            "Document Type",
+            document_type_options,
+            key="kb_doc_type",
+        )
+        meta_cols = st.columns(4)
+        authority = meta_cols[0].text_input("Issuing Authority", key="kb_doc_authority")
+        issue_date = meta_cols[1].text_input("Issue Date", placeholder="YYYY-MM-DD", key="kb_doc_issue")
+        effective_date = meta_cols[2].text_input("Effective Date", placeholder="YYYY-MM-DD", key="kb_doc_effective")
+        expiry_date = meta_cols[3].text_input("Expiry Date", placeholder="YYYY-MM-DD", key="kb_doc_expiry")
+        meta_cols2 = st.columns(3)
+        status = meta_cols2[0].selectbox("Status", ["Active", "Draft", "Expired", "Replaced", "Unknown"], key="kb_doc_status")
+        category = meta_cols2[1].text_input("Category", placeholder="Import Compliance", key="kb_doc_category")
+        source_url = meta_cols2[2].text_input("Source URL", key="kb_doc_source")
+        tags = st.text_input("Tags", placeholder="customs, civil cryptography, DDP", key="kb_doc_tags")
+        summary = st.text_area("Summary", height=120, key="kb_doc_summary")
+        fallback_chunk_content = st.text_area(
+            "Content / Key Clauses",
+            height=220,
+            key="kb_doc_chunk",
+            help="Used as a manual searchable clause when no extracted clauses are approved.",
+        )
+        chunk_cols = st.columns(3)
+        article_no = chunk_cols[0].text_input("Article No.", key="kb_doc_article")
+        clause_no = chunk_cols[1].text_input("Clause No.", key="kb_doc_clause")
+        keywords = chunk_cols[2].text_input("Keywords", key="kb_doc_keywords")
+
+        st.subheader("Step 3: Extracted Key Clauses")
+        parsed_chunks = st.session_state.get("kb_doc_chunks", [])
+        approved_chunks = []
+        if parsed_chunks:
+            st.caption("Approve only clauses that should become searchable in the Knowledge Base AI Assistant.")
+            for index, chunk in enumerate(parsed_chunks):
+                with st.container(border=True):
+                    chunk_cols = st.columns([1, 1, 1, 3])
+                    approved = chunk_cols[0].checkbox("Approve", value=False, key=f"kb_chunk_approve_{index}")
+                    edited_article = chunk_cols[1].text_input("Article", value=chunk.get("article_no", ""), key=f"kb_chunk_article_{index}")
+                    edited_clause = chunk_cols[2].text_input("Clause", value=chunk.get("clause_no", ""), key=f"kb_chunk_clause_{index}")
+                    edited_keywords = chunk_cols[3].text_input("Keywords", value=chunk.get("keywords", ""), key=f"kb_chunk_keywords_{index}")
+                    edited_heading = st.text_input("Heading", value=chunk.get("heading", ""), key=f"kb_chunk_heading_{index}")
+                    edited_content = st.text_area(
+                        "Content Preview",
+                        value=chunk.get("content", ""),
+                        height=130,
+                        key=f"kb_chunk_content_{index}",
+                    )
+                    if approved and edited_content.strip():
+                        approved_chunks.append(
+                            {
+                                "article_no": edited_article,
+                                "clause_no": edited_clause,
+                                "heading": edited_heading,
+                                "content": edited_content,
+                                "keywords": edited_keywords,
+                                "status": "Approved",
+                            }
+                        )
         else:
-            st.error("Could not find that lead to convert.")
+            st.info("No extracted clauses yet. Upload a file and click Extract & Auto-fill, or use manual content above.")
+
+        st.subheader("Step 4: Save Document")
+        if st.button("Save Legal Document", type="primary", key="kb_save_doc", disabled=not title.strip()):
+            file_path = save_uploaded_knowledge_file(uploaded_file)
+            chunks_to_save = approved_chunks
+            if not chunks_to_save and fallback_chunk_content.strip():
+                chunks_to_save = [
+                    {
+                        "article_no": article_no,
+                        "clause_no": clause_no,
+                        "heading": title,
+                        "content": fallback_chunk_content,
+                        "keywords": keywords,
+                        "status": "Approved",
+                    }
+                ]
+            document_id = save_document(
+                {
+                    "title": title,
+                    "document_no": document_no,
+                    "document_type": document_type,
+                    "issuing_authority": authority,
+                    "issue_date": issue_date,
+                    "effective_date": effective_date,
+                    "expiry_date": expiry_date,
+                    "status": status,
+                    "category": category,
+                    "source_url": source_url,
+                    "file_path": file_path,
+                    "summary": summary,
+                },
+                chunks=chunks_to_save,
+                tag_names=[item.strip() for item in tags.split(",") if item.strip()],
+            )
+            st.success(f"Legal document saved: #{document_id}")
+            st.rerun()
+
+    search_cols = st.columns(4)
+    keyword = search_cols[0].text_input("Keyword", key="kb_doc_search")
+    document_no = search_cols[1].text_input("Document No.", key="kb_doc_no_search")
+    authority = search_cols[2].text_input("Authority", key="kb_doc_authority_search")
+    category = search_cols[3].text_input("Category", key="kb_doc_category_search")
+    documents = search_documents(keyword, document_no, authority, category)
+    st.caption(f"Showing {len(documents)} legal documents")
+    if documents:
+        st.dataframe(
+            pd.DataFrame(documents)[["title", "document_no", "issuing_authority", "effective_date", "status", "category"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No legal documents found.")
+
+
+def show_sop_library():
+    st.title("SOP Library")
+    st.caption("Store internal procedures for import/export, customs clearance, quotation, and operations.")
+
+    with st.expander("Add SOP", expanded=False):
+        title = st.text_input("Title", placeholder="Import Cisco Router", key="kb_sop_title")
+        purpose = st.text_area("Purpose", height=90, key="kb_sop_purpose")
+        procedure_steps = st.text_area("Procedure Steps", height=180, key="kb_sop_steps")
+        checklist = st.text_area("Checklist", height=150, key="kb_sop_checklist")
+        rel_cols = st.columns(3)
+        related_documents = rel_cols[0].text_input("Related Documents", key="kb_sop_docs")
+        related_cases = rel_cols[1].text_input("Related Cases", key="kb_sop_cases")
+        category = rel_cols[2].text_input("Category", key="kb_sop_category")
+        status = st.selectbox("Status", ["Active", "Draft", "Paused"], key="kb_sop_status")
+        if st.button("Save SOP", type="primary", key="kb_save_sop", disabled=not title.strip()):
+            sop_id = save_sop(
+                {
+                    "title": title,
+                    "purpose": purpose,
+                    "procedure_steps": procedure_steps,
+                    "checklist": checklist,
+                    "related_documents": related_documents,
+                    "related_cases": related_cases,
+                    "category": category,
+                    "status": status,
+                    "created_by": "admin",
+                }
+            )
+            st.success(f"SOP saved: #{sop_id}")
+            st.rerun()
+
+    search_cols = st.columns(3)
+    keyword = search_cols[0].text_input("Search SOPs", key="kb_sop_search")
+    category = search_cols[1].text_input("Category", key="kb_sop_category_search")
+    status = search_cols[2].selectbox("Status", ["", "Active", "Draft", "Paused"], key="kb_sop_status_search")
+    sops = search_sops(keyword, category, status)
+    st.caption(f"Showing {len(sops)} SOPs")
+    for sop in sops:
+        with st.expander(sop["title"]):
+            st.write(sop.get("purpose") or "")
+            st.markdown("**Procedure Steps**")
+            st.write(sop.get("procedure_steps") or "-")
+            st.markdown("**Checklist**")
+            st.write(sop.get("checklist") or "-")
+            st.caption(f"Category: {sop.get('category') or '-'} | Status: {sop.get('status') or '-'}")
+
+
+def show_case_library():
+    st.title("Case Library")
+    st.caption("Store real operational experience, customer-specific know-how, and approved lessons learned.")
+
+    with st.expander("Add Case", expanded=False):
+        title = st.text_input("Title", key="kb_case_title")
+        meta_cols = st.columns(5)
+        customer = meta_cols[0].text_input("Customer", key="kb_case_customer")
+        commodity = meta_cols[1].text_input("Commodity", key="kb_case_commodity")
+        hs_code = meta_cols[2].text_input("HS Code", key="kb_case_hs")
+        country = meta_cols[3].text_input("Country", key="kb_case_country")
+        attachments = meta_cols[4].text_input("Attachments", key="kb_case_attachments")
+        problem = st.text_area("Problem / Question", height=130, key="kb_case_problem")
+        solution = st.text_area("Solution / Conclusion", height=130, key="kb_case_solution")
+        legal_basis = st.text_area("Legal Basis", height=120, key="kb_case_legal")
+        risk_notes = st.text_area("Risk Notes / Lessons Learned", height=120, key="kb_case_risk")
+        if st.button("Save Case", type="primary", key="kb_save_case", disabled=not title.strip()):
+            case_id = save_case(
+                {
+                    "title": title,
+                    "customer": customer,
+                    "commodity": commodity,
+                    "hs_code": hs_code,
+                    "country": country,
+                    "problem": problem,
+                    "solution": solution,
+                    "legal_basis": legal_basis,
+                    "risk_notes": risk_notes,
+                    "attachments": attachments,
+                    "created_by": "admin",
+                }
+            )
+            st.success(f"Case saved: #{case_id}")
+            st.rerun()
+
+    search_cols = st.columns(5)
+    keyword = search_cols[0].text_input("Search Cases", key="kb_case_search")
+    customer = search_cols[1].text_input("Customer", key="kb_case_customer_search")
+    commodity = search_cols[2].text_input("Commodity", key="kb_case_commodity_search")
+    hs_code = search_cols[3].text_input("HS Code", key="kb_case_hs_search")
+    country = search_cols[4].text_input("Country", key="kb_case_country_search")
+    cases = search_cases(keyword, customer, commodity, hs_code, country)
+    st.caption(f"Showing {len(cases)} cases")
+    for case in cases:
+        with st.expander(case["title"]):
+            st.write(f"Customer: {case.get('customer') or '-'} | Commodity: {case.get('commodity') or '-'} | HS: {case.get('hs_code') or '-'} | Country: {case.get('country') or '-'}")
+            st.markdown("**Problem**")
+            st.write(case.get("problem") or "-")
+            st.markdown("**Solution**")
+            st.write(case.get("solution") or "-")
+            st.markdown("**Legal Basis**")
+            st.write(case.get("legal_basis") or "-")
+            st.markdown("**Risk Notes**")
+            st.write(case.get("risk_notes") or "-")
+
+
+def show_knowledge_ai_assistant():
+    st.title("AI Assistant")
+    st.caption("Evidence-only assistant. It answers from stored cases, SOPs, and legal documents. No external AI provider is used in V1.")
+    question = st.text_area("Question", placeholder="Does Cisco firewall require cryptography permit?", height=120, key="kb_ai_question")
+    if st.button("Search Knowledge Base", type="primary", key="kb_ai_search", disabled=not question.strip()):
+        st.session_state.kb_ai_answer = generate_answer(question)
+
+    answer = st.session_state.get("kb_ai_answer")
+    if not answer:
+        return
+    st.subheader("Conclusion")
+    st.write(answer["conclusion"])
+    st.subheader("Legal Basis")
+    st.write(answer["legal_basis"] or "No legal basis found in stored knowledge.")
+    st.subheader("Relevant Documents")
+    if answer["relevant_documents"]:
+        st.dataframe(pd.DataFrame(answer["relevant_documents"]), use_container_width=True, hide_index=True)
+    else:
+        st.write("None found.")
+    st.subheader("Applicable SOP")
+    if answer["applicable_sops"]:
+        st.dataframe(pd.DataFrame(answer["applicable_sops"])[["title", "purpose", "category", "status"]], use_container_width=True, hide_index=True)
+    else:
+        st.write("None found.")
+    st.subheader("Related Cases")
+    if answer["related_cases"]:
+        st.dataframe(pd.DataFrame(answer["related_cases"])[["title", "customer", "commodity", "country", "solution"]], use_container_width=True, hide_index=True)
+    else:
+        st.write("None found.")
+    st.subheader("Risk Notes")
+    st.write(answer["risk_notes"])
+    st.subheader("Confidence Level")
+    st.write(answer["confidence"])
+
+
+def show_knowledge_base():
+    st.title("Knowledge Base")
+    st.caption("For logistics, customs clearance, import/export compliance, quotation preparation, and shipment operations.")
+    section = st.session_state.get("knowledge_base_page", "Legal Library")
+    if section == "Legal Library":
+        show_legal_library()
+    elif section == "SOP Library":
+        show_sop_library()
+    elif section == "Case Library":
+        show_case_library()
+    else:
+        show_knowledge_ai_assistant()
+
 
 pending_page = st.session_state.pop("pending_page", None)
 if pending_page:
     if pending_page in ["Outreach Campaigns", "Quick Capture", "Leads Import", "Leads List"]:
         st.session_state.page = "Leads"
         st.session_state.leads_page = pending_page
+        st.session_state.preserve_subpage_once = True
     elif pending_page in ["Follow-up Queue", "Occasion Reminders"]:
         st.session_state.page = "Relationships"
         st.session_state.relationships_page = pending_page
+        st.session_state.preserve_subpage_once = True
     else:
         st.session_state.page = pending_page
 if "leads_page" not in st.session_state:
     st.session_state.leads_page = "Leads List"
 if "relationships_page" not in st.session_state:
     st.session_state.relationships_page = "Follow-up Queue"
+preserve_subpage_once = bool(st.session_state.pop("preserve_subpage_once", False))
 
 with st.sidebar:
     st.title("1Aim")
-    st.radio(
-        "UI Scale",
-        UI_SCALE_OPTIONS,
-        key="ui_scale",
-        index=UI_SCALE_OPTIONS.index(st.session_state.ui_scale),
-    )
-
-    if st.session_state.ui_scale != st.session_state.persisted_ui_scale:
-        set_app_setting("ui_scale", st.session_state.ui_scale)
-        st.session_state.persisted_ui_scale = st.session_state.ui_scale
 
     page = st.radio(
         "Menu",
-        ["Dashboard", "Relationships", "Opportunities", "Leads", "Admin"],
+        ["Dashboard", "Relationships", "Inquiry Intake", "Opportunities", "Leads", "Knowledge Base", "Admin"],
         key="page",
     )
+    previous_parent_page = st.session_state.get("previous_parent_page")
+    if page == "Leads" and previous_parent_page != "Leads" and not preserve_subpage_once:
+        st.session_state.leads_page = "Leads List"
+    if page == "Relationships" and previous_parent_page != "Relationships" and not preserve_subpage_once:
+        st.session_state.relationships_page = "Follow-up Queue"
+
     if page == "Relationships":
         st.radio(
             "Relationships",
@@ -3591,9 +4247,16 @@ with st.sidebar:
     if page == "Leads":
         st.radio(
             "Leads",
-            ["Outreach Campaigns", "Quick Capture", "Leads Import", "Leads List"],
+            ["Leads List", "Quick Capture", "Leads Import", "Outreach Campaigns"],
             key="leads_page",
         )
+    if page == "Knowledge Base":
+        st.radio(
+            "Knowledge Base",
+            ["Legal Library", "SOP Library", "Case Library", "AI Assistant"],
+            key="knowledge_base_page",
+        )
+    st.session_state.previous_parent_page = page
 
 apply_global_typography(st.session_state.ui_scale)
 maybe_run_auto_git_backup()
@@ -3606,6 +4269,8 @@ elif page == "Relationships":
         show_occasion_reminders()
     else:
         show_follow_up_queue()
+elif page == "Inquiry Intake":
+    show_inquiry_intake()
 elif page == "Opportunities":
     show_opportunities()
 elif page == "Leads":
@@ -3618,6 +4283,8 @@ elif page == "Leads":
         show_leads_import()
     else:
         show_leads_list()
+elif page == "Knowledge Base":
+    show_knowledge_base()
 elif page == "Admin":
     show_admin()
 else:

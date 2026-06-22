@@ -20,6 +20,19 @@
 - Updated architecture documentation to reference the Product Constitution and consistency report.
 - Grouped Outreach Campaigns, Quick Capture, Leads Import, and Leads List under the parent Leads menu.
 - Grouped Follow-up Queue and Occasion Reminders under the parent Relationships menu.
+- Fixed Leads workspace sidebar state so opening the parent Leads menu defaults to and highlights Leads List.
+- Rebuilt Leads List as a searchable, filterable, sortable, paginated lookup page and removed the ambiguous Open Leads/Convert Lead sections.
+- Added color badges for Leads List email status, with Invalid and Bounced highlighted in red.
+- Added Knowledge Base module with Legal Library, SOP Library, Case Library, and evidence-only AI Assistant.
+- Added Knowledge Base database tables for documents, chunks, cases, tags, document tags, and SOPs.
+- Added `knowledge_service.py` for search, retrieval, save workflows, uploaded file storage, and rule-based answer generation.
+- Added `knowledge_models.py` SQLAlchemy model definitions for future ORM/vector integration.
+- Added sample Knowledge Base seed data for compliance placeholders, Cisco router SOP, and Cisco switch case structure.
+- Added Legal Library upload auto-parse flow for TXT, PDF, and DOCX files.
+- Added Vietnamese legal document parser rules for document number, type, authority, issue/effective dates, category, tags, summary, and key clauses.
+- Added per-clause approval review so extracted clauses stay `pending_review` until approved.
+- Updated Knowledge Base AI/search to ignore pending-review legal chunks.
+- Added smoke tests for legal parser extraction and pending-review exclusion.
 - Added Outreach Campaign Engine V2 foundation.
 - Added audience filtering by country, membership, lead status, and relationship status.
 - Added rule-based personalized message generation using contact and organization fields.
@@ -67,3 +80,7 @@
 - Added Git Status Refresh after Backup Now, manual Refresh Git Status, transient lock-file ignoring, and explicit dirty file listing.
 - Updated Git Health to ignore runtime SQLite database files under `data/*.db`, because DB safety is handled by database backups.
 - Added Opportunity Pipeline V1 with Opportunities menu, list, detail, create from Lead Detail, stage buttons, opportunity dashboard KPIs, and revenue KPIs.
+- Added Inquiry Intake workspace for pasted inquiry emails, attachment parsing, reviewed opportunity creation, automatic inquiry folders, saved files, prepare-quote tasks, and inquiry activity logging.
+- Added smoke test coverage for inquiry extraction, file saving, opportunity creation, and prepare-quote task creation.
+- Refined global UI styling for dark-mode controls, focus states, tabs, expanders, disabled buttons, and reusable status badges while preserving large-font accessibility.
+- Reorganized Admin settings by moving UI Scale into System Settings, grouping email maintenance under Email Settings, and moving Daily Outreach Capacity into CRM Activation.

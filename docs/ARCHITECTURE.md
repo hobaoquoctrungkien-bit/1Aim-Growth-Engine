@@ -11,6 +11,7 @@ Primary files:
 - `app.py`: Streamlit UI and page flows.
 - `database.py`: SQLite schema, migrations, business logic, scoring, CRM queries.
 - `typography.py`: global typography tokens and UI scale.
+- `ui_helpers.py`: reusable UI presentation helpers for safe badges and shared visual fragments.
 - `data/growth_engine.db`: local SQLite database.
 - `PRODUCT_CONSTITUTION.md`: product mission, principles, data model direction, and development guardrails.
 - `PRODUCT_CONSISTENCY_REPORT.md`: current alignment report and recommended documentation/system updates.
@@ -30,6 +31,12 @@ Core CRM tables:
 - `outreach_messages`
 - `outreach_campaign_templates`
 - `processed_bounce_messages`
+- `knowledge_documents`
+- `knowledge_chunks`
+- `knowledge_cases`
+- `knowledge_tags`
+- `knowledge_document_tags`
+- `knowledge_sops`
 - `backup_history`
 
 Customer is represented by `organizations.customer_status`. There is no separate customers table.
@@ -139,12 +146,81 @@ Lead-related workflows are grouped under the parent menu `Leads`.
 
 Sub-pages:
 
-- Outreach Campaigns
+- Leads List
 - Quick Capture
 - Leads Import
-- Leads List
+- Outreach Campaigns
 
 Legacy navigation requests to those pages should route through the parent `Leads` menu and preserve the intended sub-page.
+
+When the user opens the parent `Leads` menu directly, `Leads List` is the default sub-page.
+
+Leads List is the CRM lookup surface for finding a specific company or contact quickly.
+
+It supports:
+
+- Global search across company, contact, email, phone, WeChat, WhatsApp, city, country, and membership.
+- Multi-select filters for country, city, membership, lead status, customer status, relationship status, and email status.
+- Quick filters for common countries, lead statuses, and networks.
+- Sorting by priority score, created date, last contacted, next follow-up, company, and country.
+- 25-row pagination to avoid rendering the entire CRM at once.
+- Compact result rows with priority, contact, company, country, membership, lead status, relationship, email status, next follow-up, and Open action.
+
+## Knowledge Base
+
+Knowledge Base is a logistics and compliance knowledge system, not a generic legal database.
+
+Top-level menu:
+
+- Knowledge Base
+
+Sub-pages:
+
+- Legal Library
+- SOP Library
+- Case Library
+- AI Assistant
+
+Tables:
+
+- `knowledge_documents`: laws, decrees, circulars, official letters, internal references, source URLs, file paths, summaries, and metadata.
+- `knowledge_chunks`: clauses, articles, headings, keywords, review status, and future embedding storage.
+- `knowledge_cases`: real operational cases, customer-specific know-how, problem/solution/legal basis/risk notes.
+- `knowledge_tags`: reusable tags such as customs, food, DG, CO, DDP, IOR, EOR, FDA.
+- `knowledge_document_tags`: document/tag join table.
+- `knowledge_sops`: internal SOPs with purpose, steps, checklist, related documents, and related cases.
+
+Service layer:
+
+- `knowledge_service.py`
+
+Functions:
+
+- `search_documents()`
+- `search_cases()`
+- `search_sops()`
+- `extract_uploaded_text()`
+- `parse_legal_document_text()`
+- `retrieve_context()`
+- `generate_answer()`
+
+`generate_answer()` is evidence-only in V1. It searches stored cases, SOPs, documents, and approved chunks. If no supporting evidence exists, it returns "Insufficient information in knowledge base." It does not call external AI providers.
+
+Auto-parsed legal clauses are created with `status = pending_review` until the user approves them in the Legal Library review screen. Pending review chunks are not returned by `search_chunks()` and are not visible to the AI Assistant.
+
+Future vector/RAG readiness:
+
+- `knowledge_chunks.embedding` stores future embedding data separately from source document metadata.
+- `knowledge_models.py` defines SQLAlchemy models for future ORM migration and integration.
+
+Uploads:
+
+- Legal Library can store PDF, DOCX, and TXT files under `data/knowledge_uploads/`.
+- TXT, PDF, and DOCX uploads can be extracted and parsed before saving.
+- PDF extraction uses PyMuPDF when available and falls back to `pypdf`.
+- DOCX extraction uses `python-docx`.
+- The Legal Library upload flow has four steps: upload file, extract and auto-fill, review parsed information, approve key clauses, then save.
+- Vietnamese legal parser rules detect document number, document type, issuing authority, issue/effective dates, expiry/replacement phrases, category, tags, summary, and likely key clauses.
 
 ## Outreach Campaigns
 
@@ -232,11 +308,19 @@ Current Admin modules:
 - Database Backup Status
 - Git Status
 - System Settings
+- Email Settings
+- CRM Activation
+
+System Settings contains UI Scale so accessibility controls live with other app-level settings.
+
+Email Settings groups:
+
 - Email Sending
 - Email Bounce Processing
 - Invalid / Bounced Email Cleanup
 - Email Signature
-- CRM Activation
+
+CRM Activation contains Daily Outreach Capacity and CRM initialization actions.
 
 ## Git Health Monitor
 
@@ -298,6 +382,25 @@ The Opportunities page contains:
 - Create opportunity workflow
 
 Lead Detail can create an opportunity directly from the current lead context.
+
+## Inquiry Intake
+
+Inquiry Intake turns inbound freight emails into reviewed opportunities.
+
+The page supports:
+
+- Pasted inquiry email text
+- Multiple uploaded attachments
+- Text extraction from TXT, EML, CSV, PDF, DOCX, XLS, and XLSX attachments
+- Rule-based inquiry extraction for sender, email, company, trade lane, service type, mode, commodity, volume, and next action
+- Human review and edit before saving
+- Automatic file folder creation under `data/inquiries/`
+- Automatic attachment saving into the inquiry folder
+- Opportunity creation using the existing `opportunities` table
+- Prepare Quote task creation using the existing `tasks` table
+- Inquiry activity logging using the existing `activities` table
+
+Inquiry Intake does not create a separate inquiry table in V1. The reviewed inquiry is stored as an opportunity with `stage = Quote Requested`, source text in `inquiry_text`, and saved file references in opportunity notes and activity history.
 
 ## Documentation Policy
 

@@ -176,6 +176,8 @@ Automate:
 - Dashboard updates
 - Backup creation
 - Git backup diagnostics
+- Knowledge retrieval from approved stored evidence
+- Legal document metadata extraction and draft clause parsing
 
 Do not automate:
 
@@ -183,6 +185,8 @@ Do not automate:
 - Opportunity qualification
 - Strategic decisions
 - Final message approval
+- Fabricated legal or compliance references
+- Treating unreviewed extracted clauses as approved legal evidence
 
 AI assists.
 
@@ -298,6 +302,7 @@ Layer 4: Quotation Automation
 - Quote preparation tasks
 - Quote follow-up
 - Quote-to-opportunity linkage
+- Compliance and SOP evidence from Knowledge Base
 
 Layer 5: Shipment Management
 
@@ -377,3 +382,9 @@ Quick Capture:
 OCR Namecard Import:
 
 - Namecard image upload supports text extraction into Quick Capture, then parser/review/deduplication before save.
+
+Knowledge Base:
+
+- Stores laws, decrees, circulars, official letters, internal SOPs, real-life cases, and customer-specific know-how for logistics, customs clearance, import/export compliance, quotation preparation, and shipment operations.
+- Assistant answers only from stored knowledge and must never fabricate legal references.
+- Uploaded legal documents may be auto-parsed, but extracted clauses become AI/search evidence only after human approval.

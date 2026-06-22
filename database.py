@@ -416,6 +416,95 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        document_no TEXT,
+        document_type TEXT,
+        issuing_authority TEXT,
+        issue_date TEXT,
+        effective_date TEXT,
+        expiry_date TEXT,
+        status TEXT,
+        category TEXT,
+        source_url TEXT,
+        file_path TEXT,
+        summary TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        document_id INTEGER,
+        article_no TEXT,
+        clause_no TEXT,
+        heading TEXT,
+        content TEXT,
+        keywords TEXT,
+        embedding TEXT,
+        status TEXT DEFAULT 'Approved',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(document_id) REFERENCES knowledge_documents(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_cases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        customer TEXT,
+        commodity TEXT,
+        hs_code TEXT,
+        country TEXT,
+        problem TEXT,
+        solution TEXT,
+        legal_basis TEXT,
+        risk_notes TEXT,
+        attachments TEXT,
+        created_by TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_document_tags (
+        document_id INTEGER NOT NULL,
+        tag_id INTEGER NOT NULL,
+        PRIMARY KEY(document_id, tag_id),
+        FOREIGN KEY(document_id) REFERENCES knowledge_documents(id),
+        FOREIGN KEY(tag_id) REFERENCES knowledge_tags(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_sops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        purpose TEXT,
+        procedure_steps TEXT,
+        checklist TEXT,
+        related_documents TEXT,
+        related_cases TEXT,
+        category TEXT,
+        status TEXT DEFAULT 'Active',
+        created_by TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         contact_id INTEGER,
@@ -469,6 +558,45 @@ def init_db():
     add_column("backup_history", "branch TEXT")
     add_column("backup_history", "status TEXT")
     add_column("backup_history", "message TEXT")
+    add_column("knowledge_documents", "document_no TEXT")
+    add_column("knowledge_documents", "document_type TEXT")
+    add_column("knowledge_documents", "issuing_authority TEXT")
+    add_column("knowledge_documents", "issue_date TEXT")
+    add_column("knowledge_documents", "effective_date TEXT")
+    add_column("knowledge_documents", "expiry_date TEXT")
+    add_column("knowledge_documents", "status TEXT")
+    add_column("knowledge_documents", "category TEXT")
+    add_column("knowledge_documents", "source_url TEXT")
+    add_column("knowledge_documents", "file_path TEXT")
+    add_column("knowledge_documents", "summary TEXT")
+    add_column("knowledge_documents", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+    add_column("knowledge_chunks", "article_no TEXT")
+    add_column("knowledge_chunks", "clause_no TEXT")
+    add_column("knowledge_chunks", "heading TEXT")
+    add_column("knowledge_chunks", "content TEXT")
+    add_column("knowledge_chunks", "keywords TEXT")
+    add_column("knowledge_chunks", "embedding TEXT")
+    add_column("knowledge_chunks", "status TEXT DEFAULT 'Approved'")
+    add_column("knowledge_cases", "customer TEXT")
+    add_column("knowledge_cases", "commodity TEXT")
+    add_column("knowledge_cases", "hs_code TEXT")
+    add_column("knowledge_cases", "country TEXT")
+    add_column("knowledge_cases", "problem TEXT")
+    add_column("knowledge_cases", "solution TEXT")
+    add_column("knowledge_cases", "legal_basis TEXT")
+    add_column("knowledge_cases", "risk_notes TEXT")
+    add_column("knowledge_cases", "attachments TEXT")
+    add_column("knowledge_cases", "created_by TEXT")
+    add_column("knowledge_cases", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+    add_column("knowledge_sops", "purpose TEXT")
+    add_column("knowledge_sops", "procedure_steps TEXT")
+    add_column("knowledge_sops", "checklist TEXT")
+    add_column("knowledge_sops", "related_documents TEXT")
+    add_column("knowledge_sops", "related_cases TEXT")
+    add_column("knowledge_sops", "category TEXT")
+    add_column("knowledge_sops", "status TEXT DEFAULT 'Active'")
+    add_column("knowledge_sops", "created_by TEXT")
+    add_column("knowledge_sops", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
     add_column("processed_bounce_messages", "bounced_email TEXT")
     add_column("processed_bounce_messages", "bounce_type TEXT")
     add_column("processed_bounce_messages", "reason TEXT")
@@ -648,6 +776,7 @@ def init_db():
 
     migrate_crm_records(cur)
     seed_holiday_library(cur)
+    seed_knowledge_base(cur)
     cur.execute(
         """
         INSERT OR IGNORE INTO app_settings (setting_key, setting_value, updated_at)
@@ -1662,6 +1791,131 @@ def seed_holiday_library(cur):
         )
 
 
+def seed_knowledge_base(cur):
+    tags = [
+        "customs",
+        "food",
+        "animal quarantine",
+        "civil cryptography",
+        "medical device",
+        "battery",
+        "DG",
+        "CO",
+        "customs valuation",
+        "DDP",
+        "IOR",
+        "EOR",
+        "FDA",
+    ]
+    for tag in tags:
+        cur.execute("INSERT OR IGNORE INTO knowledge_tags (name) VALUES (?)", (tag,))
+
+    if not cur.execute("SELECT 1 FROM knowledge_documents WHERE title = ?", ("Vietnam Civil Cryptography Import Control - Internal Placeholder",)).fetchone():
+        cur.execute(
+            """
+            INSERT INTO knowledge_documents (
+                title,
+                document_no,
+                document_type,
+                issuing_authority,
+                status,
+                category,
+                summary,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                "Vietnam Civil Cryptography Import Control - Internal Placeholder",
+                "INTERNAL-KB-CRYPTO-001",
+                "Internal SOP Reference",
+                "1Aim Logistics",
+                "Draft",
+                "Import Compliance",
+                "Placeholder reference for storing official rules and internal interpretation about civil cryptography import control.",
+            ),
+        )
+        document_id = cur.lastrowid
+        cur.execute(
+            """
+            INSERT INTO knowledge_chunks (
+                document_id,
+                heading,
+                content,
+                keywords,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                document_id,
+                "Evidence-first compliance answers",
+                "For cryptography permit questions, answer only from stored legal documents, SOPs, and approved cases. If evidence is missing, state insufficient information.",
+                "civil cryptography, permit, import compliance, Vietnam",
+            ),
+        )
+
+    if not cur.execute("SELECT 1 FROM knowledge_sops WHERE title = ?", ("Import Cisco Router - Compliance Check",)).fetchone():
+        cur.execute(
+            """
+            INSERT INTO knowledge_sops (
+                title,
+                purpose,
+                procedure_steps,
+                checklist,
+                related_documents,
+                category,
+                status,
+                created_by,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'Active', 'system', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                "Import Cisco Router - Compliance Check",
+                "Guide ops team through initial compliance review before quoting/importing Cisco networking equipment.",
+                "1. Confirm model and HS code.\n2. Check whether device includes encryption/security features.\n3. Search Legal Library and Case Library.\n4. Escalate if no supporting evidence exists.",
+                "Model confirmed\nHS code checked\nLegal basis attached\nCustomer risk note prepared",
+                "INTERNAL-KB-CRYPTO-001",
+                "Import Compliance",
+            ),
+        )
+
+    if not cur.execute("SELECT 1 FROM knowledge_cases WHERE title = ?", ("Cisco switch imported into Vietnam - cryptography permit review",)).fetchone():
+        cur.execute(
+            """
+            INSERT INTO knowledge_cases (
+                title,
+                customer,
+                commodity,
+                hs_code,
+                country,
+                problem,
+                solution,
+                legal_basis,
+                risk_notes,
+                created_by,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'system', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                "Cisco switch imported into Vietnam - cryptography permit review",
+                "Sample Customer",
+                "Cisco switch",
+                "",
+                "Vietnam",
+                "Customer asked whether a Cisco switch required civil cryptography permit before import.",
+                "Sample conclusion: do not rely on this case alone. Attach official legal basis before advising customer.",
+                "Internal placeholder only. Add official document references before using operationally.",
+                "This sample case exists to demonstrate structure. Confidence should remain low until legal basis is added.",
+            ),
+        )
+
+
 def migrate_crm_records(cur):
     company_rows = cur.execute("SELECT * FROM companies").fetchall()
     for company in company_rows:
@@ -1825,6 +2079,153 @@ def create_inquiry(inquiry_text):
 
     conn.commit()
     conn.close()
+
+
+def create_inquiry_opportunity(record, user="admin"):
+    today = date.today().isoformat()
+    clean_record = {key: clean_value(value) for key, value in (record or {}).items()}
+
+    conn = get_connection()
+    cur = conn.cursor()
+    admin_user = cur.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE username = ?
+        """,
+        ("admin",),
+    ).fetchone()
+    admin_user_id = admin_user["id"] if admin_user else None
+
+    organization_id = None
+    contact_id = None
+    if clean_record.get("company_name"):
+        crm_record = {
+            "company_name": clean_record.get("company_name"),
+            "contact_person": clean_record.get("contact_person"),
+            "country": clean_record.get("country"),
+            "city": clean_record.get("city"),
+            "phone": clean_record.get("phone"),
+            "email": clean_record.get("email"),
+            "source": "Inquiry Intake",
+            "campaign": "Inbound Inquiry",
+            "relationship_status": "Connected",
+            "status": "Inquiry",
+            "notes": clean_record.get("raw_text"),
+        }
+        organization_id = upsert_organization(cur, crm_record)
+        contact_id = upsert_contact(cur, organization_id, crm_record)
+
+    opportunity_name = clean_record.get("opportunity_name") or clean_record.get("subject") or "Inbound Inquiry"
+    stage = normalize_opportunity_stage(clean_record.get("stage") or "Quote Requested")
+    status = opportunity_status_from_stage(stage)
+    inquiry_date = clean_record.get("inquiry_date") or today
+    notes = clean_record.get("notes")
+
+    cur.execute(
+        """
+        INSERT INTO opportunities (
+            opportunity_name,
+            title,
+            organization_id,
+            contact_id,
+            owner,
+            stage,
+            status,
+            trade_lane,
+            service_type,
+            route,
+            commodity,
+            volume,
+            mode,
+            next_action,
+            next_action_date,
+            notes,
+            inquiry_text,
+            inquiry_date,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (
+            opportunity_name,
+            opportunity_name,
+            organization_id,
+            contact_id,
+            admin_user_id,
+            stage,
+            status,
+            clean_record.get("trade_lane"),
+            clean_record.get("service_type"),
+            clean_record.get("trade_lane"),
+            clean_record.get("commodity"),
+            clean_record.get("volume"),
+            clean_record.get("mode"),
+            clean_record.get("next_action") or "Prepare quotation",
+            clean_record.get("next_action_date") or today,
+            notes,
+            clean_record.get("raw_text"),
+            inquiry_date,
+        ),
+    )
+    opportunity_id = cur.lastrowid
+
+    cur.execute(
+        """
+        INSERT INTO tasks (
+            opportunity_id,
+            task_type,
+            title,
+            due_date,
+            status,
+            priority,
+            assigned_to,
+            created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            opportunity_id,
+            "prepare_quote",
+            "Prepare quote: " + opportunity_name[:60],
+            clean_record.get("next_action_date") or today,
+            "open",
+            "high",
+            admin_user_id,
+            admin_user_id,
+        ),
+    )
+    task_id = cur.lastrowid
+
+    activity_lines = [
+        f"Inquiry received: {opportunity_name}",
+        f"Trade lane: {clean_record.get('trade_lane') or '-'}",
+        f"Service: {clean_record.get('service_type') or '-'}",
+    ]
+    if clean_record.get("attachment_folder"):
+        activity_lines.append(f"Folder: {clean_record.get('attachment_folder')}")
+    if clean_record.get("attachment_files"):
+        activity_lines.append("Files: " + clean_record.get("attachment_files"))
+
+    log_crm_activity(
+        cur,
+        "Inquiry Received",
+        "\n".join(activity_lines),
+        organization_id=organization_id,
+        contact_id=contact_id,
+        opportunity_id=opportunity_id,
+        user=user,
+    )
+
+    conn.commit()
+    conn.close()
+    return {
+        "opportunity_id": opportunity_id,
+        "task_id": task_id,
+        "organization_id": organization_id,
+        "contact_id": contact_id,
+    }
 
 
 def mark_prepare_quote_sent(task_id, follow_up_date, current_user_id=None):
@@ -3229,6 +3630,7 @@ def get_leads():
             COALESCE(contacts.whatsapp, leads.whatsapp) AS whatsapp,
             COALESCE(organizations.membership, leads.membership) AS membership,
             COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(leads.priority_score, 0) AS priority_score,
             leads.action_score,
             COALESCE(leads.status, leads.lead_status, 'New') AS status,
             COALESCE(leads.owner, 'admin') AS owner,
@@ -3238,8 +3640,12 @@ def get_leads():
             leads.next_action,
             leads.next_action_date,
             contacts.last_contacted_at,
+            contacts.next_follow_up_at,
             contacts.relationship_status,
-            organizations.customer_status
+            COALESCE(contacts.email_status, 'Unknown') AS email_status,
+            organizations.customer_status,
+            leads.created_at,
+            leads.updated_at
         FROM leads
         LEFT JOIN organizations ON organizations.id = leads.organization_id
         LEFT JOIN contacts ON contacts.id = leads.contact_id

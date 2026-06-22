@@ -289,6 +289,58 @@ Kien Ho
 Date: 2026-06-22
 
 Decision:
+Leads List should be a searchable CRM lookup page, not an Open Leads conversion section.
+
+Reason:
+Kien needs to locate any contact or company within seconds. A separate Open Leads section was ambiguous and made it harder to find specific records in a large lead database.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Auto-extracted Knowledge Base legal clauses require human approval before AI/search can use them.
+
+Reason:
+Legal and compliance answers must be based on reviewed evidence. OCR or parser mistakes could create false legal references if draft clauses became searchable automatically.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Knowledge Base is a logistics and operations knowledge module, not a generic legal database.
+
+Reason:
+1Aim needs stored knowledge to support customs clearance, import/export compliance, quotation preparation, shipment operations, SOP reuse, and customer-specific know-how. The assistant must answer only from stored evidence to avoid fabricated legal references.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Knowledge Base V1 uses rule-based retrieval and clean service interfaces instead of external AI providers.
+
+Reason:
+The product needs a safe evidence-only assistant now while preserving a clean path for future vector search and OpenAI integration.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
 Relationship maintenance workflows are grouped under a parent `Relationships` menu.
 
 Reason:
