@@ -1,5 +1,18 @@
 # Decisions
 
+Date: 2026-06-22
+
+Decision:
+`PRODUCT_CONSTITUTION.md` is the highest-priority product document for future 1Aim Growth Engine development.
+
+Reason:
+The product now spans CRM, outreach, opportunities, quotations, future shipments, backups, Git safety, and relationship intelligence. A single source of truth prevents feature drift and keeps development aligned with 1Aim's freight-forwarding relationship mission.
+
+Approved By:
+Kien Ho
+
+---
+
 Date: 2026-06-21
 
 Decision:

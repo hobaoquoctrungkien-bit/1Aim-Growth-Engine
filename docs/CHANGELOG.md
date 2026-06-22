@@ -15,6 +15,9 @@
 
 ## 2026-06-22
 
+- Added `PRODUCT_CONSTITUTION.md` as the highest-priority product source of truth.
+- Added `PRODUCT_CONSISTENCY_REPORT.md` comparing the constitution against architecture, CRM rules, `.codex-rules.md`, and current implementation.
+- Updated architecture documentation to reference the Product Constitution and consistency report.
 - Added Outreach Campaign Engine V2 foundation.
 - Added audience filtering by country, membership, lead status, and relationship status.
 - Added rule-based personalized message generation using contact and organization fields.

@@ -4,12 +4,16 @@
 
 1Aim Growth Engine is a Streamlit application backed by SQLite.
 
+Product direction is governed by `PRODUCT_CONSTITUTION.md`, which is the highest-priority product document for future development.
+
 Primary files:
 
 - `app.py`: Streamlit UI and page flows.
 - `database.py`: SQLite schema, migrations, business logic, scoring, CRM queries.
 - `typography.py`: global typography tokens and UI scale.
 - `data/growth_engine.db`: local SQLite database.
+- `PRODUCT_CONSTITUTION.md`: product mission, principles, data model direction, and development guardrails.
+- `PRODUCT_CONSISTENCY_REPORT.md`: current alignment report and recommended documentation/system updates.
 
 ## CRM Data Model
 
@@ -254,6 +258,8 @@ The Opportunities page contains:
 Lead Detail can create an opportunity directly from the current lead context.
 
 ## Documentation Policy
+
+Product direction follows `PRODUCT_CONSTITUTION.md` first.
 
 Business logic changes update `docs/CRM_RULES.md`.
 
