@@ -78,6 +78,19 @@ Kien Ho
 
 ---
 
+Date: 2026-06-22
+
+Decision:
+Git Health ignores runtime SQLite database files under `data/*.db`.
+
+Reason:
+The live SQLite database changes whenever the app records runtime state such as backup history. Database safety is handled by timestamped DB backups and restore testing, while Git Health should reflect source code, documentation, and configuration sync.
+
+Approved By:
+Kien Ho
+
+---
+
 Date: 2026-06-21
 
 Decision:

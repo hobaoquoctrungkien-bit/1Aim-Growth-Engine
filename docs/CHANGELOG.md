@@ -65,4 +65,5 @@
 - Added Auto Backup Every setting with Off, 30 min, 1 hour, and 4 hours options.
 - Added Dashboard Last Successful Backup widget.
 - Added Git Status Refresh after Backup Now, manual Refresh Git Status, transient lock-file ignoring, and explicit dirty file listing.
+- Updated Git Health to ignore runtime SQLite database files under `data/*.db`, because DB safety is handled by database backups.
 - Added Opportunity Pipeline V1 with Opportunities menu, list, detail, create from Lead Detail, stage buttons, opportunity dashboard KPIs, and revenue KPIs.

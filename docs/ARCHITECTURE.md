@@ -278,6 +278,14 @@ Git Health ignores transient runtime lock files:
 - `data/git_backup_running.lock`
 - `*.lock`
 
+Git Health also ignores runtime SQLite database files under `data/*.db`.
+
+Reason:
+
+- `data/growth_engine.db` changes whenever the app records runtime state such as backup history.
+- SQLite data safety is handled by the database backup/restore system.
+- Git status should reflect code, documentation, and configuration changes rather than live runtime database churn.
+
 ## Opportunities
 
 The Opportunities page contains:

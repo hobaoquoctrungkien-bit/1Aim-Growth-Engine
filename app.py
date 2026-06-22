@@ -1086,7 +1086,13 @@ def is_ignored_git_status_path(path_text):
     clean_path = (path_text or "").replace("\\", "/").strip().strip('"')
     if not clean_path:
         return False
-    return clean_path == "data/git_backup_running.lock" or clean_path.endswith(".lock")
+    return (
+        clean_path == "data/git_backup_running.lock"
+        or clean_path == "data/growth_engine.db"
+        or clean_path.endswith(".lock")
+        or clean_path.startswith("data/backups/")
+        or (clean_path.startswith("data/") and clean_path.endswith(".db"))
+    )
 
 
 def parse_git_status_lines(status_text):
