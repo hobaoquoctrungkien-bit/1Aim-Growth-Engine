@@ -1,8 +1,10 @@
 import sqlite3
+import smtplib
 import time
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
+from email.message import EmailMessage
 from pathlib import Path
 
 DB_PATH = Path("data/growth_engine.db")
@@ -207,6 +209,7 @@ def init_db():
         lead_status TEXT DEFAULT 'New',
         interest_level TEXT,
         priority_score INTEGER DEFAULT 0,
+        action_score INTEGER DEFAULT 0,
         next_action TEXT,
         next_action_date TEXT,
         status TEXT DEFAULT 'New Lead',
@@ -225,12 +228,23 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS opportunities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id INTEGER,
         contact_id INTEGER,
+        opportunity_name TEXT,
         title TEXT NOT NULL,
         route TEXT,
         commodity TEXT,
         volume TEXT,
         mode TEXT,
+        stage TEXT DEFAULT 'Interested',
+        trade_lane TEXT,
+        service_type TEXT,
+        potential_revenue REAL DEFAULT 0,
+        potential_profit REAL DEFAULT 0,
+        expected_close_date TEXT,
+        next_action TEXT,
+        next_action_date TEXT,
+        notes TEXT,
         status TEXT DEFAULT 'new',
         owner INTEGER,
         inquiry_text TEXT,
@@ -238,6 +252,7 @@ def init_db():
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(owner) REFERENCES users(id),
+        FOREIGN KEY(organization_id) REFERENCES organizations(id),
         FOREIGN KEY(contact_id) REFERENCES contacts(id)
     )
     """)
@@ -316,6 +331,48 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS outreach_campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_name TEXT NOT NULL,
+        country_filter TEXT,
+        membership_filter TEXT,
+        lead_status_filter TEXT,
+        relationship_status_filter TEXT,
+        status TEXT DEFAULT 'Draft',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        approved_at TEXT,
+        sent_at TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS outreach_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL,
+        lead_id INTEGER,
+        organization_id INTEGER,
+        contact_id INTEGER,
+        email TEXT,
+        subject TEXT,
+        message_body TEXT,
+        message_version INTEGER DEFAULT 1,
+        status TEXT DEFAULT 'Draft',
+        sent_at TEXT,
+        opened_at TEXT,
+        replied_at TEXT,
+        qualified_at TEXT,
+        error_message TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(campaign_id) REFERENCES outreach_campaigns(id),
+        FOREIGN KEY(lead_id) REFERENCES leads(id),
+        FOREIGN KEY(organization_id) REFERENCES organizations(id),
+        FOREIGN KEY(contact_id) REFERENCES contacts(id)
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         contact_id INTEGER,
@@ -345,12 +402,36 @@ def init_db():
 
     add_column("tasks", "channel TEXT")
     add_column("tasks", "campaign_name TEXT")
+    add_column("outreach_campaigns", "country_filter TEXT")
+    add_column("outreach_campaigns", "membership_filter TEXT")
+    add_column("outreach_campaigns", "lead_status_filter TEXT")
+    add_column("outreach_campaigns", "relationship_status_filter TEXT")
+    add_column("outreach_campaigns", "status TEXT DEFAULT 'Draft'")
+    add_column("outreach_campaigns", "approved_at TEXT")
+    add_column("outreach_campaigns", "sent_at TEXT")
+    add_column("outreach_campaigns", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+    add_column("outreach_messages", "message_version INTEGER DEFAULT 1")
+    add_column("outreach_messages", "opened_at TEXT")
+    add_column("outreach_messages", "replied_at TEXT")
+    add_column("outreach_messages", "qualified_at TEXT")
+    add_column("outreach_messages", "error_message TEXT")
     add_column("tasks", "assigned_to INTEGER")
     add_column("tasks", "created_by INTEGER")
     add_column("activities", "lead_id INTEGER")
     add_column("activities", "organization_id INTEGER")
     add_column("activities", "description TEXT")
     add_column("activities", "user TEXT")
+    add_column("opportunities", "organization_id INTEGER")
+    add_column("opportunities", "opportunity_name TEXT")
+    add_column("opportunities", "stage TEXT DEFAULT 'Interested'")
+    add_column("opportunities", "trade_lane TEXT")
+    add_column("opportunities", "service_type TEXT")
+    add_column("opportunities", "potential_revenue REAL DEFAULT 0")
+    add_column("opportunities", "potential_profit REAL DEFAULT 0")
+    add_column("opportunities", "expected_close_date TEXT")
+    add_column("opportunities", "next_action TEXT")
+    add_column("opportunities", "next_action_date TEXT")
+    add_column("opportunities", "notes TEXT")
     add_column("opportunities", "owner INTEGER")
     add_column("quotations", "owner INTEGER")
     add_column("organizations", "type TEXT DEFAULT 'Other'")
@@ -404,6 +485,7 @@ def init_db():
     add_column("leads", "lead_status TEXT DEFAULT 'New'")
     add_column("leads", "interest_level TEXT")
     add_column("leads", "priority_score INTEGER DEFAULT 0")
+    add_column("leads", "action_score INTEGER DEFAULT 0")
     add_column("leads", "next_action TEXT")
     add_column("leads", "next_action_date TEXT")
     add_column("leads", "status TEXT DEFAULT 'New Lead'")
@@ -482,6 +564,30 @@ def init_db():
             AND last_touch_at IS NOT NULL
         """
     )
+    cur.execute(
+        """
+        UPDATE opportunities
+        SET opportunity_name = title
+        WHERE (opportunity_name IS NULL OR opportunity_name = '')
+            AND title IS NOT NULL
+        """
+    )
+    cur.execute(
+        """
+        UPDATE opportunities
+        SET stage = CASE
+                WHEN LOWER(COALESCE(status, '')) IN ('quote_requested', 'quote requested') THEN 'Quote Requested'
+                WHEN LOWER(COALESCE(status, '')) IN ('quote_sent', 'quoted', 'pricing') THEN 'Quoted'
+                WHEN LOWER(COALESCE(status, '')) = 'negotiation' THEN 'Negotiation'
+                WHEN LOWER(COALESCE(status, '')) = 'won' THEN 'Won'
+                WHEN LOWER(COALESCE(status, '')) = 'lost' THEN 'Lost'
+                ELSE COALESCE(NULLIF(stage, ''), 'Interested')
+            END
+        WHERE stage IS NULL
+            OR stage = ''
+            OR stage = 'new'
+        """
+    )
 
     migrate_crm_records(cur)
     seed_holiday_library(cur)
@@ -543,6 +649,50 @@ def clean_value(value):
     if value is None:
         return ""
     return str(value).strip()
+
+
+OPPORTUNITY_STAGES = ["Interested", "Quote Requested", "Quoted", "Negotiation", "Won", "Lost"]
+
+
+def normalize_opportunity_stage(value):
+    clean = clean_value(value)
+    if clean in OPPORTUNITY_STAGES:
+        return clean
+    status_map = {
+        "new": "Interested",
+        "open": "Interested",
+        "active": "Interested",
+        "quote_requested": "Quote Requested",
+        "quote requested": "Quote Requested",
+        "quote_sent": "Quoted",
+        "quoted": "Quoted",
+        "pricing": "Quoted",
+        "negotiation": "Negotiation",
+        "won": "Won",
+        "lost": "Lost",
+    }
+    return status_map.get(normalize(clean), "Interested")
+
+
+def opportunity_status_from_stage(stage):
+    stage = normalize_opportunity_stage(stage)
+    return {
+        "Interested": "new",
+        "Quote Requested": "quote_requested",
+        "Quoted": "quoted",
+        "Negotiation": "negotiation",
+        "Won": "won",
+        "Lost": "lost",
+    }[stage]
+
+
+def parse_money(value):
+    if value in [None, ""]:
+        return 0.0
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return 0.0
 
 
 def row_value(row, key, default=""):
@@ -642,6 +792,192 @@ def calculate_priority_score(row):
     return min(score, 100)
 
 
+def calculate_contact_completeness(row):
+    fields = ["email", "phone", "wechat", "whatsapp", "job_title"]
+    present = sum(1 for field in fields if clean_value(row_value(row, field, "")))
+    return round((present / len(fields)) * 100) if fields else 0
+
+
+def calculate_organization_completeness(row):
+    fields = ["website", "membership", "country", "city", "type"]
+    present = sum(1 for field in fields if clean_value(row_value(row, field, "")))
+    return round((present / len(fields)) * 100) if fields else 0
+
+
+def calculate_crm_completeness(contact_row=None, organization_row=None):
+    contact_score = calculate_contact_completeness(contact_row or {})
+    organization_score = calculate_organization_completeness(organization_row or {})
+    return {
+        "contact_score": contact_score,
+        "organization_score": organization_score,
+        "overall_score": round((contact_score + organization_score) / 2),
+    }
+
+
+def get_missing_data_checklist(contact_row=None, organization_row=None):
+    contact_row = contact_row or {}
+    organization_row = organization_row or {}
+    contact_fields = [
+        ("email", "Email"),
+        ("phone", "Phone"),
+        ("wechat", "WeChat"),
+        ("whatsapp", "WhatsApp"),
+        ("job_title", "Job Title"),
+    ]
+    organization_fields = [
+        ("website", "Website"),
+        ("membership", "Membership"),
+        ("country", "Country"),
+        ("city", "City"),
+        ("type", "Organization Type"),
+    ]
+
+    return {
+        "contact": [
+            {"field": field, "label": label}
+            for field, label in contact_fields
+            if not clean_value(row_value(contact_row, field, ""))
+        ],
+        "organization": [
+            {"field": field, "label": label}
+            for field, label in organization_fields
+            if not clean_value(row_value(organization_row, field, ""))
+        ],
+    }
+
+
+def calculate_relationship_health(lead_row=None, contact_row=None, organization_row=None):
+    lead_row = lead_row or {}
+    contact_row = contact_row or {}
+    organization_row = organization_row or {}
+    data_quality = calculate_crm_completeness(contact_row, organization_row)
+
+    relationship_status = clean_value(row_value(contact_row, "relationship_status", "New"))
+    customer_status = clean_value(row_value(organization_row, "customer_status", "Prospect"))
+    last_contacted = row_value(contact_row, "last_contacted_at", "") or row_value(lead_row, "last_contacted_at", "")
+    next_follow_up = row_value(contact_row, "next_follow_up_at", "") or row_value(lead_row, "next_action_date", "")
+
+    score = 0
+    components = []
+
+    if customer_status == "Customer":
+        score += 30
+        components.append({"label": "Customer organization", "points": 30})
+    elif customer_status == "Qualified":
+        score += 20
+        components.append({"label": "Qualified organization", "points": 20})
+    elif customer_status == "Prospect":
+        score += 10
+        components.append({"label": "Prospect organization", "points": 10})
+
+    relationship_points = {
+        "Active": 30,
+        "Warm": 25,
+        "Introduced": 15,
+        "Connected": 10,
+        "New": 5,
+    }.get(relationship_status, 0)
+    if relationship_points:
+        score += relationship_points
+        components.append({"label": f"{relationship_status} relationship", "points": relationship_points})
+
+    last_contact_date = parse_iso_date(last_contacted)
+    if not last_contact_date:
+        components.append({"label": "No last contact date", "points": 0})
+    else:
+        days_since_contact = (date.today() - last_contact_date).days
+        if days_since_contact <= 30:
+            score += 20
+            components.append({"label": "Contacted within 30 days", "points": 20})
+        elif days_since_contact <= 60:
+            score += 10
+            components.append({"label": "Contacted within 60 days", "points": 10})
+        else:
+            components.append({"label": "No contact for more than 60 days", "points": 0})
+
+    next_follow_up_date = parse_iso_date(next_follow_up)
+    if not next_follow_up_date:
+        components.append({"label": "No next follow-up date", "points": 0})
+    elif next_follow_up_date < date.today():
+        components.append({"label": "Follow-up is overdue", "points": 0})
+    else:
+        score += 10
+        components.append({"label": "Next follow-up scheduled", "points": 10})
+
+    data_quality_points = round(data_quality["overall_score"] * 0.1)
+    score += data_quality_points
+    components.append({"label": f"Data quality {data_quality['overall_score']}%", "points": data_quality_points})
+
+    score = min(score, 100)
+    if score >= 75:
+        label = "Healthy"
+    elif score >= 50:
+        label = "Needs Attention"
+    else:
+        label = "At Risk"
+
+    return {
+        "score": score,
+        "label": label,
+        "components": components,
+        "last_contacted_at": last_contacted,
+        "next_follow_up_at": next_follow_up,
+    }
+
+
+def calculate_action_score(row):
+    return sum(item["points"] for item in get_action_score_breakdown(row))
+
+
+def get_action_score_breakdown(row):
+    customer_status = clean_value(row_value(row, "customer_status", ""))
+    relationship_status = clean_value(row_value(row, "relationship_status", "New"))
+    country = normalize(row_value(row, "country", ""))
+    membership = normalize(row_value(row, "membership", ""))
+    last_contacted = row_value(row, "last_contacted_at", "")
+
+    breakdown = []
+
+    if customer_status == "Customer":
+        breakdown.append({"label": "Customer organization", "points": 100})
+    else:
+        relationship_points = {
+            "Active": 80,
+            "Warm": 60,
+            "Introduced": 40,
+            "Connected": 20,
+            "New": 0,
+        }.get(relationship_status, 0)
+        if relationship_points:
+            breakdown.append(
+                {
+                    "label": f"{relationship_status} relationship",
+                    "points": relationship_points,
+                }
+            )
+
+    last_contact_date = parse_iso_date(last_contacted)
+    if last_contact_date:
+        days_since_contact = (date.today() - last_contact_date).days
+        if days_since_contact > 90:
+            breakdown.append({"label": "No contact for more than 90 days", "points": 40})
+        elif days_since_contact > 60:
+            breakdown.append({"label": "No contact for more than 60 days", "points": 30})
+        elif days_since_contact > 30:
+            breakdown.append({"label": "No contact for more than 30 days", "points": 20})
+        elif days_since_contact > 14:
+            breakdown.append({"label": "No contact for more than 14 days", "points": 10})
+
+    if country == "china":
+        breakdown.append({"label": "China strategic focus", "points": 20})
+
+    for network in ["olo", "wca", "jctrans"]:
+        if network in membership:
+            breakdown.append({"label": f"{network.upper()} membership", "points": 15})
+
+    return breakdown
+
+
 def recommended_action_for_row(row):
     customer_status = clean_value(row_value(row, "customer_status", ""))
     relationship_status = clean_value(row_value(row, "relationship_status", ""))
@@ -677,7 +1013,24 @@ def refresh_lead_priority_scores():
             COALESCE(leads.lead_status, 'New') AS lead_status,
             COALESCE(contacts.last_contacted_at, leads.last_contacted_at, '') AS last_contacted_at,
             COALESCE(organizations.customer_status, '') AS customer_status,
-            COALESCE(leads.priority_score, 0) AS priority_score
+            COALESCE(leads.priority_score, 0) AS priority_score,
+            COALESCE(leads.action_score, 0) AS action_score,
+            EXISTS (
+                SELECT 1 FROM opportunities
+                WHERE opportunities.contact_id = leads.contact_id
+                    AND LOWER(COALESCE(opportunities.status, '')) IN ('new', 'open', 'active')
+            ) AS has_open_opportunity,
+            EXISTS (
+                SELECT 1 FROM opportunities
+                WHERE opportunities.contact_id = leads.contact_id
+                    AND LOWER(COALESCE(opportunities.status, '')) IN ('quote_requested', 'quote requested')
+            ) AS has_quote_requested,
+            EXISTS (
+                SELECT 1 FROM quotations
+                LEFT JOIN opportunities ON opportunities.id = quotations.opportunity_id
+                WHERE opportunities.contact_id = leads.contact_id
+                    AND LOWER(COALESCE(quotations.status, '')) IN ('draft', 'pricing', 'sent')
+            ) AS has_pricing
         FROM leads
         LEFT JOIN organizations ON organizations.id = leads.organization_id
         LEFT JOIN contacts ON contacts.id = leads.contact_id
@@ -686,17 +1039,19 @@ def refresh_lead_priority_scores():
 
     updated = 0
     for row in rows:
-        score = calculate_priority_score(row)
-        if int(row["priority_score"] or 0) == score:
+        priority_score = calculate_priority_score(row)
+        action_score = calculate_action_score(row)
+        if int(row["priority_score"] or 0) == priority_score and int(row["action_score"] or 0) == action_score:
             continue
         cur.execute(
             """
             UPDATE leads
             SET priority_score = ?,
+                action_score = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (score, row["id"]),
+            (priority_score, action_score, row["id"]),
         )
         updated += 1
 
@@ -1168,6 +1523,8 @@ def log_crm_activity(
     lead_id=None,
     organization_id=None,
     contact_id=None,
+    opportunity_id=None,
+    quotation_id=None,
     user="admin",
 ):
     cur.execute(
@@ -1176,6 +1533,8 @@ def log_crm_activity(
             lead_id,
             organization_id,
             contact_id,
+            opportunity_id,
+            quotation_id,
             activity_type,
             description,
             summary,
@@ -1183,12 +1542,14 @@ def log_crm_activity(
             activity_at,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """,
         (
             lead_id,
             organization_id,
             contact_id,
+            opportunity_id,
+            quotation_id,
             activity_type,
             description,
             description,
@@ -1655,6 +2016,311 @@ def set_app_setting(setting_key, setting_value):
     conn.close()
 
 
+def get_smtp_settings():
+    try:
+        port = int(get_app_setting("smtp_port", "587") or 587)
+    except (TypeError, ValueError):
+        port = 587
+    return {
+        "host": get_app_setting("smtp_host", ""),
+        "port": port,
+        "username": get_app_setting("smtp_username", ""),
+        "password": get_app_setting("smtp_password", ""),
+        "from_email": get_app_setting("smtp_from_email", ""),
+        "from_name": get_app_setting("smtp_from_name", "1Aim"),
+        "use_tls": get_app_setting("smtp_use_tls", "1") == "1",
+    }
+
+
+def is_smtp_configured():
+    settings = get_smtp_settings()
+    return bool(settings["host"] and settings["from_email"])
+
+
+def send_email_via_smtp(to_email, subject, message_body):
+    settings = get_smtp_settings()
+    if not is_smtp_configured():
+        return False, "SMTP settings are not configured."
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = (
+        f"{settings['from_name']} <{settings['from_email']}>"
+        if settings["from_name"]
+        else settings["from_email"]
+    )
+    message["To"] = to_email
+    message.set_content(message_body)
+
+    try:
+        with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as server:
+            if settings["use_tls"]:
+                server.starttls()
+            if settings["username"]:
+                server.login(settings["username"], settings["password"])
+            server.send_message(message)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def get_campaign_filter_options():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            COALESCE(organizations.country, leads.country, '') AS country,
+            COALESCE(organizations.membership, leads.membership, '') AS membership,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(contacts.relationship_status, 'New') AS relationship_status
+        FROM leads
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        """
+    ).fetchall()
+    conn.close()
+
+    def values_for(key):
+        return sorted({clean_value(row[key]) for row in rows if clean_value(row[key])})
+
+    return {
+        "countries": values_for("country"),
+        "memberships": values_for("membership"),
+        "lead_statuses": values_for("lead_status"),
+        "relationship_statuses": values_for("relationship_status"),
+    }
+
+
+def get_campaign_audience(filters):
+    country = clean_value(filters.get("country"))
+    membership = clean_value(filters.get("membership"))
+    lead_status = clean_value(filters.get("lead_status"))
+    relationship_status = clean_value(filters.get("relationship_status"))
+    limit = int(filters.get("limit") or 50)
+
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            leads.id AS lead_id,
+            leads.organization_id,
+            leads.contact_id,
+            COALESCE(contacts.name, contacts.contact_person, contacts.full_name, leads.contact_person, '') AS contact_name,
+            COALESCE(contacts.job_title, leads.job_title, '') AS job_title,
+            COALESCE(organizations.name, leads.company_name, '') AS organization_name,
+            COALESCE(organizations.country, leads.country, '') AS country,
+            COALESCE(organizations.city, leads.city, '') AS city,
+            COALESCE(organizations.membership, leads.membership, '') AS membership,
+            COALESCE(leads.lead_status, 'New') AS lead_status,
+            COALESCE(contacts.relationship_status, 'New') AS relationship_status,
+            COALESCE(contacts.email, leads.email, '') AS email
+        FROM leads
+        LEFT JOIN organizations ON organizations.id = leads.organization_id
+        LEFT JOIN contacts ON contacts.id = leads.contact_id
+        WHERE COALESCE(contacts.email, leads.email, '') <> ''
+            AND (? = '' OR LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = LOWER(TRIM(?)))
+            AND (? = '' OR LOWER(COALESCE(organizations.membership, leads.membership, '')) LIKE '%' || LOWER(?) || '%')
+            AND (? = '' OR COALESCE(leads.lead_status, 'New') = ?)
+            AND (? = '' OR COALESCE(contacts.relationship_status, 'New') = ?)
+        ORDER BY COALESCE(leads.action_score, 0) DESC,
+            leads.next_action_date ASC,
+            leads.id ASC
+        LIMIT ?
+        """,
+        (
+            country,
+            country,
+            membership,
+            membership,
+            lead_status,
+            lead_status,
+            relationship_status,
+            relationship_status,
+            limit,
+        ),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def generate_outreach_subject(row, campaign_name):
+    company = clean_value(row_value(row, "organization_name", "your team"))
+    return f"{campaign_name} - 1Aim x {company}" if campaign_name else f"1Aim x {company}"
+
+
+def generate_outreach_message(row, campaign_name):
+    name = clean_value(row_value(row, "contact_name", "")) or "there"
+    company = clean_value(row_value(row, "organization_name", "your team"))
+    city = clean_value(row_value(row, "city", ""))
+    country = clean_value(row_value(row, "country", ""))
+    job_title = clean_value(row_value(row, "job_title", ""))
+
+    location = " / ".join(part for part in [city, country] if part)
+    role_line = f" I noticed your role as {job_title}." if job_title else ""
+    location_line = f" Since {company} is based in {location}, I wanted to reach out directly." if location else ""
+
+    return (
+        f"Hi {name},\n\n"
+        f"This is Kien from 1Aim in Vietnam.{role_line}{location_line}\n\n"
+        "We support freight forwarders with Vietnam-related shipments, overseas coordination, "
+        "and backend follow-up work so partners can respond faster and keep customers moving.\n\n"
+        "Would it be useful to stay connected and explore how 1Aim can support your team when you have Vietnam inquiries?\n\n"
+        "Best regards,\n"
+        "Kien Ho\n"
+        "1Aim"
+    )
+
+
+def create_and_send_outreach_campaign(campaign_name, filters, messages, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO outreach_campaigns (
+            campaign_name,
+            country_filter,
+            membership_filter,
+            lead_status_filter,
+            relationship_status_filter,
+            status,
+            created_at,
+            approved_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'Approved', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (
+            campaign_name,
+            clean_value(filters.get("country")),
+            clean_value(filters.get("membership")),
+            clean_value(filters.get("lead_status")),
+            clean_value(filters.get("relationship_status")),
+        ),
+    )
+    campaign_id = cur.lastrowid
+
+    results = {"sent": 0, "failed": 0, "campaign_id": campaign_id}
+    for message in messages:
+        ok, error_message = send_email_via_smtp(
+            message["email"],
+            message["subject"],
+            message["message_body"],
+        )
+        status = "Sent" if ok else "Failed"
+        sent_at = datetime.now().isoformat(timespec="seconds") if ok else None
+        cur.execute(
+            """
+            INSERT INTO outreach_messages (
+                campaign_id,
+                lead_id,
+                organization_id,
+                contact_id,
+                email,
+                subject,
+                message_body,
+                message_version,
+                status,
+                sent_at,
+                error_message,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                campaign_id,
+                message.get("lead_id"),
+                message.get("organization_id"),
+                message.get("contact_id"),
+                message.get("email"),
+                message.get("subject"),
+                message.get("message_body"),
+                int(message.get("message_version") or 1),
+                status,
+                sent_at,
+                error_message,
+            ),
+        )
+
+        if ok:
+            results["sent"] += 1
+            cur.execute(
+                """
+                UPDATE leads
+                SET lead_status = 'Contacted',
+                    status = 'Contacted',
+                    campaign = COALESCE(NULLIF(campaign, ''), ?),
+                    next_action = 'Follow-up',
+                    next_action_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (campaign_name, days_from_today(7), message.get("lead_id")),
+            )
+            if message.get("contact_id"):
+                cur.execute(
+                    """
+                    UPDATE contacts
+                    SET last_contacted_at = CURRENT_TIMESTAMP,
+                        next_follow_up_at = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (days_from_today(7), message.get("contact_id")),
+                )
+            log_crm_activity(
+                cur,
+                "Outreach Campaign Sent",
+                f"Sent campaign {campaign_name} to {message.get('email')}",
+                lead_id=message.get("lead_id"),
+                organization_id=message.get("organization_id"),
+                contact_id=message.get("contact_id"),
+                user=user,
+            )
+        else:
+            results["failed"] += 1
+
+    cur.execute(
+        """
+        UPDATE outreach_campaigns
+        SET status = ?,
+            sent_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        ("Sent" if results["failed"] == 0 else "Partial", campaign_id),
+    )
+    conn.commit()
+    conn.close()
+    return results
+
+
+def get_outreach_campaign_metrics():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            outreach_campaigns.id,
+            outreach_campaigns.campaign_name,
+            outreach_campaigns.status,
+            outreach_campaigns.sent_at,
+            COUNT(outreach_messages.id) AS total,
+            SUM(CASE WHEN outreach_messages.status = 'Sent' THEN 1 ELSE 0 END) AS sent,
+            SUM(CASE WHEN outreach_messages.opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opened,
+            SUM(CASE WHEN outreach_messages.replied_at IS NOT NULL OR leads.lead_status IN ('Replied', 'Qualified', 'Converted') THEN 1 ELSE 0 END) AS replied,
+            SUM(CASE WHEN outreach_messages.qualified_at IS NOT NULL OR leads.lead_status IN ('Qualified', 'Converted') THEN 1 ELSE 0 END) AS qualified
+        FROM outreach_campaigns
+        LEFT JOIN outreach_messages ON outreach_messages.campaign_id = outreach_campaigns.id
+        LEFT JOIN leads ON leads.id = outreach_messages.lead_id
+        GROUP BY outreach_campaigns.id
+        ORDER BY outreach_campaigns.created_at DESC, outreach_campaigns.id DESC
+        LIMIT 20
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def get_existing_lead_keys():
     conn = get_connection()
 
@@ -1787,6 +2453,7 @@ def get_leads():
             COALESCE(contacts.whatsapp, leads.whatsapp) AS whatsapp,
             COALESCE(organizations.membership, leads.membership) AS membership,
             COALESCE(leads.lead_status, 'New') AS lead_status,
+            leads.action_score,
             COALESCE(leads.status, leads.lead_status, 'New') AS status,
             COALESCE(leads.owner, 'admin') AS owner,
             leads.source,
@@ -1867,6 +2534,19 @@ def get_lead_detail(lead_id):
         "lead": dict(lead),
         "organization": dict(organization) if organization else None,
         "contact": dict(contact) if contact else None,
+        "data_quality": calculate_crm_completeness(
+            dict(contact) if contact else {},
+            dict(organization) if organization else {},
+        ),
+        "missing_data": get_missing_data_checklist(
+            dict(contact) if contact else {},
+            dict(organization) if organization else {},
+        ),
+        "relationship_health": calculate_relationship_health(
+            dict(lead),
+            dict(contact) if contact else {},
+            dict(organization) if organization else {},
+        ),
         "activities": [dict(activity) for activity in activities],
     }
 
@@ -1885,6 +2565,7 @@ def get_crm_follow_up_rows():
             COALESCE(contacts.job_title, leads.job_title, '') AS job_title,
             COALESCE(organizations.name, leads.company_name, '') AS organization_name,
             COALESCE(organizations.type, '') AS organization_type,
+            COALESCE(organizations.website, '') AS organization_website,
             COALESCE(organizations.country, leads.country, '') AS country,
             COALESCE(organizations.city, leads.city, '') AS city,
             COALESCE(organizations.membership, leads.membership, '') AS membership,
@@ -1892,6 +2573,7 @@ def get_crm_follow_up_rows():
             COALESCE(contacts.relationship_status, '') AS relationship_status,
             COALESCE(leads.lead_status, 'New') AS lead_status,
             COALESCE(leads.priority_score, 0) AS priority_score,
+            COALESCE(leads.action_score, 0) AS action_score,
             COALESCE(contacts.last_contacted_at, leads.last_contacted_at, '') AS last_contacted_at,
             COALESCE(contacts.next_follow_up_at, '') AS contact_next_follow_up_at,
             COALESCE(leads.next_action, '') AS next_action,
@@ -1902,7 +2584,23 @@ def get_crm_follow_up_rows():
             COALESCE(contacts.email, leads.email, '') AS email,
             COALESCE(contacts.phone, leads.phone, '') AS phone,
             COALESCE(contacts.wechat, leads.wechat, '') AS wechat,
-            COALESCE(contacts.whatsapp, leads.whatsapp, '') AS whatsapp
+            COALESCE(contacts.whatsapp, leads.whatsapp, '') AS whatsapp,
+            EXISTS (
+                SELECT 1 FROM opportunities
+                WHERE opportunities.contact_id = leads.contact_id
+                    AND LOWER(COALESCE(opportunities.status, '')) IN ('new', 'open', 'active')
+            ) AS has_open_opportunity,
+            EXISTS (
+                SELECT 1 FROM opportunities
+                WHERE opportunities.contact_id = leads.contact_id
+                    AND LOWER(COALESCE(opportunities.status, '')) IN ('quote_requested', 'quote requested')
+            ) AS has_quote_requested,
+            EXISTS (
+                SELECT 1 FROM quotations
+                LEFT JOIN opportunities ON opportunities.id = quotations.opportunity_id
+                WHERE opportunities.contact_id = leads.contact_id
+                    AND LOWER(COALESCE(quotations.status, '')) IN ('draft', 'pricing', 'sent')
+            ) AS has_pricing
         FROM leads
         LEFT JOIN organizations ON organizations.id = leads.organization_id
         LEFT JOIN contacts ON contacts.id = leads.contact_id
@@ -1915,6 +2613,32 @@ def get_crm_follow_up_rows():
     for row in rows:
         item = dict(row)
         item["priority_score"] = calculate_priority_score(item)
+        item["action_score"] = calculate_action_score(item)
+        item["action_score_breakdown"] = get_action_score_breakdown(item)
+        item["relationship_health"] = calculate_relationship_health(
+            {
+                "last_contacted_at": item["last_contacted_at"],
+                "next_action_date": item["next_action_date"],
+            },
+            {
+                "relationship_status": item["relationship_status"],
+                "last_contacted_at": item["last_contacted_at"],
+                "next_follow_up_at": item["contact_next_follow_up_at"],
+                "email": item["email"],
+                "phone": item["phone"],
+                "wechat": item["wechat"],
+                "whatsapp": item["whatsapp"],
+                "job_title": item["job_title"],
+            },
+            {
+                "customer_status": item["customer_status"],
+                "website": item["organization_website"],
+                "membership": item["membership"],
+                "country": item["country"],
+                "city": item["city"],
+                "type": item["organization_type"],
+            },
+        )
         item["recommended_action"] = recommended_action_for_row(item)
         next_date_text = item["next_action_date"] or item["contact_next_follow_up_at"]
         next_date = None
@@ -1924,13 +2648,37 @@ def get_crm_follow_up_rows():
             except ValueError:
                 next_date = None
 
-        lead_open = item["lead_status"] in ["New", "Contacted", "Replied", "Qualified"]
-        relationship_open = item["relationship_status"] in ["Connected", "Introduced", "Warm"]
-        due_by_date = next_date is not None and next_date <= today
-        missing_lead_followup = lead_open and not item["next_action_date"]
-        missing_contact_followup = relationship_open and not item["contact_next_follow_up_at"]
+        last_contact_date = parse_iso_date(item["last_contacted_at"])
+        if last_contact_date:
+            days_since_contact = (today - last_contact_date).days
+            maintenance_overdue_days = max(days_since_contact - 30, 0)
+            needs_maintenance = last_contact_date <= today - timedelta(days=30)
+        else:
+            days_since_contact = None
+            maintenance_overdue_days = 9999
+            needs_maintenance = True
 
-        if not (due_by_date or missing_lead_followup or missing_contact_followup):
+        scheduled_due = next_date is not None and next_date <= today
+        active_relationship_maintenance = (
+            item["relationship_status"] in ["Warm", "Active"]
+            and needs_maintenance
+        )
+        customer_maintenance = (
+            item["customer_status"] in ["Customer", "Qualified"]
+            and needs_maintenance
+        )
+        new_lead_first_touch = (
+            item["lead_status"] == "New"
+            and next_date is not None
+            and next_date <= today
+        )
+
+        if not (
+            scheduled_due
+            or active_relationship_maintenance
+            or customer_maintenance
+            or new_lead_first_touch
+        ):
             continue
 
         if next_date and next_date < today:
@@ -1949,6 +2697,24 @@ def get_crm_follow_up_rows():
             due_bucket = "Future"
             due_rank = 7
 
+        if customer_maintenance:
+            action_reason = "Customer Maintenance"
+        elif active_relationship_maintenance:
+            action_reason = "Active Relationship Maintenance"
+        elif new_lead_first_touch:
+            action_reason = "New Lead First Touch"
+        elif next_date and next_date < today:
+            action_reason = "Overdue"
+        else:
+            action_reason = "Due Today"
+
+        if scheduled_due and next_date:
+            overdue_days = max((today - next_date).days, 0)
+        elif active_relationship_maintenance or customer_maintenance:
+            overdue_days = maintenance_overdue_days
+        else:
+            overdue_days = 0
+
         status_rank = 6
         if item["relationship_status"] in ["Warm", "Active"]:
             status_rank = 3
@@ -1959,7 +2725,15 @@ def get_crm_follow_up_rows():
 
         overdue_rank = 0 if due_bucket == "Overdue" else 1
         item["due_bucket"] = due_bucket
-        item["sort_rank"] = (-item["priority_score"], overdue_rank, next_date or date.max, status_rank)
+        item["action_reason"] = action_reason
+        item["overdue_days"] = overdue_days
+        item["sort_rank"] = (
+            -item["action_score"],
+            -item["overdue_days"],
+            next_date or date.max,
+            overdue_rank,
+            status_rank,
+        )
         queue_rows.append(item)
 
     return sorted(queue_rows, key=lambda item: item["sort_rank"])
@@ -2115,32 +2889,109 @@ def get_crm_dashboard_data():
         """
     ).fetchall()
 
-    china_priority_rows = conn.execute(
+    relationship_counts = {
+        "New": 0,
+        "Connected": 0,
+        "Introduced": 0,
+        "Warm": 0,
+        "Active": 0,
+        "Customer": 0,
+    }
+    relationship_rows = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(relationship_status, ''), 'New') AS stage,
+            COUNT(DISTINCT id) AS count
+        FROM contacts
+        GROUP BY COALESCE(NULLIF(relationship_status, ''), 'New')
+        """
+    ).fetchall()
+    for row in relationship_rows:
+        stage = row["stage"] if row["stage"] in relationship_counts else "New"
+        relationship_counts[stage] += row["count"]
+    relationship_counts["Customer"] = conn.execute(
+        """
+        SELECT COUNT(DISTINCT id) AS count
+        FROM organizations
+        WHERE customer_status = 'Customer'
+        """
+    ).fetchone()["count"]
+
+    funnel_order = ["New", "Connected", "Introduced", "Warm", "Active", "Customer"]
+    relationship_funnel = []
+    previous_count = None
+    for stage in funnel_order:
+        count = relationship_counts.get(stage, 0)
+        conversion_rate = None
+        if previous_count is not None:
+            conversion_rate = round((count / previous_count) * 100, 1) if previous_count else 0
+        relationship_funnel.append(
+            {
+                "stage": stage,
+                "count": count,
+                "conversion_rate": conversion_rate,
+            }
+        )
+        previous_count = count
+
+    quality_rows = conn.execute(
         """
         SELECT
-            leads.id AS lead_id,
-            COALESCE(contacts.name, contacts.contact_person, contacts.full_name, leads.contact_person, '') AS contact_name,
-            COALESCE(organizations.name, leads.company_name, '') AS organization_name,
-            COALESCE(organizations.city, leads.city, '') AS city,
+            COALESCE(contacts.email, leads.email, '') AS email,
+            COALESCE(contacts.phone, leads.phone, '') AS phone,
+            COALESCE(contacts.wechat, leads.wechat, '') AS wechat,
+            COALESCE(contacts.whatsapp, leads.whatsapp, '') AS whatsapp,
+            COALESCE(contacts.job_title, leads.job_title, '') AS job_title,
+            COALESCE(organizations.website, '') AS website,
             COALESCE(organizations.membership, leads.membership, '') AS membership,
-            COALESCE(contacts.relationship_status, '') AS relationship_status,
-            COALESCE(leads.lead_status, 'New') AS lead_status,
-            COALESCE(leads.priority_score, 0) AS priority_score
+            COALESCE(organizations.country, leads.country, '') AS country,
+            COALESCE(organizations.city, leads.city, '') AS city,
+            COALESCE(organizations.type, '') AS type
         FROM leads
         LEFT JOIN contacts ON contacts.id = leads.contact_id
         LEFT JOIN organizations ON organizations.id = leads.organization_id
-        WHERE LOWER(TRIM(COALESCE(organizations.country, leads.country, ''))) = 'china'
-            AND COALESCE(leads.lead_status, 'New') <> 'Disqualified'
-        ORDER BY COALESCE(leads.priority_score, 0) DESC,
-            leads.next_action_date ASC,
-            leads.id ASC
-        LIMIT 20
         """
     ).fetchall()
+    quality_scores = [
+        round(
+            (
+                calculate_contact_completeness(row)
+                + calculate_organization_completeness(row)
+            )
+            / 2
+        )
+        for row in quality_rows
+    ]
+
+    china_cities = ["Shenzhen", "Shanghai", "Ningbo", "Qingdao", "Xiamen", "Tianjin"]
+    china_network = []
+    for city in china_cities:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(DISTINCT contacts.id) AS contacts,
+                COUNT(DISTINCT CASE WHEN contacts.relationship_status = 'Warm' THEN contacts.id END) AS warm,
+                COUNT(DISTINCT CASE WHEN contacts.relationship_status = 'Active' THEN contacts.id END) AS active,
+                COUNT(DISTINCT CASE WHEN organizations.customer_status = 'Customer' THEN organizations.id END) AS customers
+            FROM organizations
+            LEFT JOIN contacts ON contacts.organization_id = organizations.id
+            WHERE LOWER(TRIM(organizations.country)) = 'china'
+                AND LOWER(TRIM(organizations.city)) = LOWER(TRIM(?))
+            """,
+            (city,),
+        ).fetchone()
+        china_network.append(
+            {
+                "city": city,
+                "contacts": row["contacts"] or 0,
+                "warm": row["warm"] or 0,
+                "active": row["active"] or 0,
+                "customers": row["customers"] or 0,
+            }
+        )
 
     conn.close()
     queue_rows = get_crm_follow_up_rows()
-    today_actions = [row for row in queue_rows if row["due_bucket"] in ["Overdue", "Today"]][:capacity]
+    today_actions = [row for row in queue_rows if row.get("action_reason")][:capacity]
     return {
         "kpis": dict(kpis),
         "daily_outreach_capacity": capacity,
@@ -2150,7 +3001,12 @@ def get_crm_dashboard_data():
             "next_30_days": int(row_value(outreach, "month_count", 0) or 0),
         },
         "today_action_list": today_actions,
-        "china_priority_leads": [dict(row) for row in china_priority_rows],
+        "relationship_funnel": relationship_funnel,
+        "data_quality": {
+            "average_score": round(sum(quality_scores) / len(quality_scores)) if quality_scores else 0,
+            "record_count": len(quality_scores),
+        },
+        "china_network": china_network,
         "today_followups": [row for row in queue_rows if row["due_bucket"] == "Today"][:10],
         "overdue_followups": [row for row in queue_rows if row["due_bucket"] == "Overdue"][:10],
         "warm_relationships": [
@@ -2164,6 +3020,295 @@ def get_crm_dashboard_data():
         "campaign_progress": [dict(row) for row in campaign_progress],
         "country_pipeline": [dict(row) for row in country_pipeline],
     }
+
+
+def get_opportunity_dashboard_data():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            COALESCE(NULLIF(stage, ''), status, 'Interested') AS raw_stage,
+            COALESCE(potential_revenue, 0) AS potential_revenue,
+            COALESCE(potential_profit, 0) AS potential_profit
+        FROM opportunities
+        """
+    ).fetchall()
+    conn.close()
+
+    stage_counts = {stage: 0 for stage in OPPORTUNITY_STAGES}
+    total_pipeline_value = 0.0
+    negotiation_value = 0.0
+    won_value = 0.0
+
+    for row in rows:
+        stage = normalize_opportunity_stage(row["raw_stage"])
+        value = float(row["potential_revenue"] or 0)
+        stage_counts[stage] += 1
+        if stage != "Lost":
+            total_pipeline_value += value
+        if stage == "Negotiation":
+            negotiation_value += value
+        if stage == "Won":
+            won_value += value
+
+    return {
+        "total_opportunities": len(rows),
+        "stage_counts": stage_counts,
+        "total_pipeline_value": total_pipeline_value,
+        "negotiation_value": negotiation_value,
+        "won_value": won_value,
+    }
+
+
+def get_opportunities():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            opportunities.*,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS display_name,
+            COALESCE(NULLIF(opportunities.stage, ''), opportunities.status, 'Interested') AS raw_stage,
+            organizations.name AS organization_name,
+            organizations.country,
+            organizations.city,
+            contacts.name AS contact_name
+        FROM opportunities
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+        ORDER BY opportunities.updated_at DESC, opportunities.id DESC
+        """
+    ).fetchall()
+    conn.close()
+
+    opportunities = []
+    for row in rows:
+        item = dict(row)
+        item["stage"] = normalize_opportunity_stage(item.get("raw_stage"))
+        opportunities.append(item)
+
+    stage_rank = {
+        "Interested": 1,
+        "Quote Requested": 2,
+        "Quoted": 3,
+        "Negotiation": 4,
+        "Won": 5,
+        "Lost": 6,
+    }
+    return sorted(
+        opportunities,
+        key=lambda item: (
+            stage_rank.get(item["stage"], 9),
+            item.get("next_action_date") or item.get("expected_close_date") or "9999-12-31",
+            -int(item["id"]),
+        ),
+    )
+
+
+def get_opportunity_detail(opportunity_id):
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT
+            opportunities.*,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS display_name,
+            COALESCE(NULLIF(opportunities.stage, ''), opportunities.status, 'Interested') AS raw_stage,
+            organizations.name AS organization_name,
+            organizations.country,
+            organizations.city,
+            contacts.name AS contact_name,
+            contacts.email,
+            contacts.phone,
+            contacts.wechat,
+            contacts.whatsapp
+        FROM opportunities
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+        WHERE opportunities.id = ?
+        """,
+        (opportunity_id,),
+    ).fetchone()
+
+    activities = conn.execute(
+        """
+        SELECT *
+        FROM activities
+        WHERE opportunity_id = ?
+        ORDER BY COALESCE(activity_at, created_at) DESC, id DESC
+        """,
+        (opportunity_id,),
+    ).fetchall()
+    conn.close()
+
+    if not row:
+        return None
+    item = dict(row)
+    item["stage"] = normalize_opportunity_stage(item.get("raw_stage"))
+    item["activities"] = [dict(activity) for activity in activities]
+    return item
+
+
+def save_opportunity(record, opportunity_id=None, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    stage = normalize_opportunity_stage(record.get("stage"))
+    status = opportunity_status_from_stage(stage)
+    opportunity_name = clean_value(record.get("opportunity_name")) or "New Opportunity"
+
+    if opportunity_id:
+        existing = cur.execute(
+            "SELECT * FROM opportunities WHERE id = ?",
+            (opportunity_id,),
+        ).fetchone()
+        if not existing:
+            conn.close()
+            return None
+        cur.execute(
+            """
+            UPDATE opportunities
+            SET opportunity_name = ?,
+                title = ?,
+                organization_id = ?,
+                contact_id = ?,
+                owner = ?,
+                stage = ?,
+                status = ?,
+                trade_lane = ?,
+                service_type = ?,
+                potential_revenue = ?,
+                potential_profit = ?,
+                expected_close_date = ?,
+                next_action = ?,
+                next_action_date = ?,
+                notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                opportunity_name,
+                opportunity_name,
+                record.get("organization_id"),
+                record.get("contact_id"),
+                record.get("owner"),
+                stage,
+                status,
+                record.get("trade_lane"),
+                record.get("service_type"),
+                parse_money(record.get("potential_revenue")),
+                parse_money(record.get("potential_profit")),
+                record.get("expected_close_date"),
+                record.get("next_action"),
+                record.get("next_action_date"),
+                record.get("notes"),
+                opportunity_id,
+            ),
+        )
+        saved_id = opportunity_id
+        description = f"Opportunity updated: {opportunity_name}"
+    else:
+        cur.execute(
+            """
+            INSERT INTO opportunities (
+                opportunity_name,
+                title,
+                organization_id,
+                contact_id,
+                owner,
+                stage,
+                status,
+                trade_lane,
+                service_type,
+                potential_revenue,
+                potential_profit,
+                expected_close_date,
+                next_action,
+                next_action_date,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                opportunity_name,
+                opportunity_name,
+                record.get("organization_id"),
+                record.get("contact_id"),
+                record.get("owner"),
+                stage,
+                status,
+                record.get("trade_lane"),
+                record.get("service_type"),
+                parse_money(record.get("potential_revenue")),
+                parse_money(record.get("potential_profit")),
+                record.get("expected_close_date"),
+                record.get("next_action"),
+                record.get("next_action_date"),
+                record.get("notes"),
+            ),
+        )
+        saved_id = cur.lastrowid
+        description = f"Opportunity created: {opportunity_name}"
+
+    log_crm_activity(
+        cur,
+        "Opportunity Update",
+        description,
+        opportunity_id=saved_id,
+        organization_id=record.get("organization_id"),
+        contact_id=record.get("contact_id"),
+        user=user,
+    )
+
+    conn.commit()
+    conn.close()
+    return saved_id
+
+
+def update_opportunity_stage(opportunity_id, stage, user="admin"):
+    conn = get_connection()
+    cur = conn.cursor()
+    opportunity = cur.execute(
+        "SELECT organization_id, contact_id FROM opportunities WHERE id = ?",
+        (opportunity_id,),
+    ).fetchone()
+    if not opportunity:
+        conn.close()
+        return False
+
+    normalized_stage = normalize_opportunity_stage(stage)
+    cur.execute(
+        """
+        UPDATE opportunities
+        SET stage = ?,
+            status = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (normalized_stage, opportunity_status_from_stage(normalized_stage), opportunity_id),
+    )
+    log_crm_activity(
+        cur,
+        "Opportunity Update",
+        f"Opportunity stage changed to {normalized_stage}",
+        opportunity_id=opportunity_id,
+        organization_id=opportunity["organization_id"],
+        contact_id=opportunity["contact_id"],
+        user=user,
+    )
+    if normalized_stage == "Won" and opportunity["organization_id"]:
+        cur.execute(
+            """
+            UPDATE organizations
+            SET customer_status = 'Customer',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (opportunity["organization_id"],),
+        )
+    conn.commit()
+    conn.close()
+    return True
 
 
 def update_lead_detail(lead_id, organization_data, contact_data, lead_data):

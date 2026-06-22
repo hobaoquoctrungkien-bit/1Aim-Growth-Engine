@@ -1,6 +1,8 @@
 import logging
 import importlib
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -24,7 +26,15 @@ from database import (
     get_crm_follow_up_rows,
     get_daily_outreach_capacity,
     get_holiday_library,
+    get_opportunities,
+    get_opportunity_dashboard_data,
+    get_opportunity_detail,
     get_open_tasks,
+    get_outreach_campaign_metrics,
+    get_campaign_audience,
+    get_campaign_filter_options,
+    generate_outreach_message,
+    generate_outreach_subject,
     get_task_counts_by_type,
     import_leads,
     initialize_missing_lead_followups,
@@ -32,7 +42,11 @@ from database import (
     mark_prepare_quote_sent,
     save_captured_crm_record,
     save_holiday_library_item,
+    save_opportunity,
+    create_and_send_outreach_campaign,
     has_captured_crm_duplicates,
+    is_smtp_configured,
+    send_email_via_smtp,
     set_app_setting,
     complete_follow_up,
     add_country_holiday_reminders,
@@ -50,6 +64,8 @@ from database import (
     update_lead_notes,
     update_lead_status_action,
     update_organization_customer_action,
+    update_opportunity_stage,
+    OPPORTUNITY_STAGES,
 )
 from typography import DEFAULT_UI_SCALE, UI_SCALE_OPTIONS, get_typography_tokens
 
@@ -862,6 +878,29 @@ def show_dashboard():
             unsafe_allow_html=True,
         )
 
+    def action_score_badge(score):
+        st.markdown(
+            f"""
+            <div style="border:1px solid #2f80ed;color:#edf2f7;background:#172033;border-radius:6px;padding:6px 8px;text-align:center;font-weight:700;">
+                {int(score or 0)}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    def health_badge(health):
+        score = int((health or {}).get("score") or 0)
+        label = (health or {}).get("label") or "-"
+        color = "#2ecc71" if score >= 75 else "#ff9f43" if score >= 50 else "#ff5a5f"
+        st.markdown(
+            f"""
+            <div style="border:1px solid {color};color:{color};border-radius:6px;padding:6px 8px;text-align:center;font-weight:700;">
+                {score}% {label}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     kpi_cols = st.columns(6)
     labels = [
         ("Follow-ups Due Today", "due_today"),
@@ -881,6 +920,21 @@ def show_dashboard():
     priority_cols[3].metric("High Priority Contacts", int(kpis.get("high_priority_contacts") or 0))
     priority_cols[4].metric("China Leads", int(kpis.get("china_leads") or 0))
     priority_cols[5].metric("China Warm Relationships", int(kpis.get("china_warm_relationships") or 0))
+
+    intelligence_cols = st.columns(2)
+    with intelligence_cols[0]:
+        st.subheader("Relationship Funnel")
+        funnel = data["relationship_funnel"]
+        funnel_cols = st.columns(len(funnel))
+        for col, stage in zip(funnel_cols, funnel):
+            delta = ""
+            if stage["conversion_rate"] is not None:
+                delta = f"{stage['conversion_rate']}% from previous"
+            col.metric(stage["stage"], stage["count"], delta=delta)
+    with intelligence_cols[1]:
+        st.subheader("CRM Data Quality")
+        st.metric("Average Completeness", f"{data['data_quality']['average_score']}%")
+        st.caption(f"Measured across {data['data_quality']['record_count']} lead records.")
 
     if int(kpis.get("no_followup") or 0):
         st.warning(f"{int(kpis.get('no_followup') or 0)} leads need activation scheduling.")
@@ -915,65 +969,63 @@ def show_dashboard():
     if not data["today_action_list"]:
         st.info("No outreach actions due today.")
     else:
-        header_cols = st.columns([1, 2, 2, 1, 2, 1, 1, 1])
-        header_cols[0].caption("Priority")
+        header_cols = st.columns([1, 2, 2, 1, 2, 2, 2, 2, 1, 1, 1, 1])
+        header_cols[0].caption("Action Score")
         header_cols[1].caption("Contact")
-        header_cols[2].caption("Organization")
+        header_cols[2].caption("Company")
         header_cols[3].caption("Country")
-        header_cols[4].caption("Next Action")
-        header_cols[5].caption("Open")
-        header_cols[6].caption("Done")
-        header_cols[7].caption("Snooze")
+        header_cols[4].caption("Relationship")
+        header_cols[5].caption("Health")
+        header_cols[6].caption("Next Action")
+        header_cols[7].caption("Reason")
+        header_cols[8].caption("Why")
+        header_cols[9].caption("Open")
+        header_cols[10].caption("Done")
+        header_cols[11].caption("Snooze")
     for row in data["today_action_list"]:
-        cols = st.columns([1, 2, 2, 1, 2, 1, 1, 1])
+        cols = st.columns([1, 2, 2, 1, 2, 2, 2, 2, 1, 1, 1, 1])
         with cols[0]:
-            priority_badge(row["priority_score"])
+            action_score_badge(row["action_score"])
         cols[1].write(row["contact_name"] or "No contact")
         cols[2].write(row["organization_name"] or "No organization")
         cols[3].write(row["country"] or "-")
-        cols[4].write(row["recommended_action"] or row["next_action"] or "Follow up")
-        if cols[5].button("Open", key=f"dash_action_open_{row['lead_id']}"):
+        cols[4].write(row["relationship_status"] or row["lead_status"] or "-")
+        with cols[5]:
+            health_badge(row.get("relationship_health"))
+        cols[6].write(row["recommended_action"] or row["next_action"] or "Follow up")
+        cols[7].write(row.get("action_reason") or row["due_bucket"])
+        with cols[8]:
+            with st.popover("Why"):
+                st.write(f"Reason: {row.get('action_reason') or row['due_bucket']}")
+                st.write(f"Due date: {row.get('next_action_date') or '-'}")
+                st.write(f"Overdue days: {row.get('overdue_days') or 0}")
+                st.write("Score components:")
+                breakdown = row.get("action_score_breakdown") or []
+                if breakdown:
+                    for item in breakdown:
+                        st.write(f"+{item['points']} {item['label']}")
+                else:
+                    st.write("No score boosters yet.")
+        if cols[9].button("Open", key=f"dash_action_open_{row['lead_id']}"):
             st.session_state.selected_lead_id = row["lead_id"]
             st.session_state.pending_page = "Leads List"
             st.rerun()
-        if cols[6].button("Done", key=f"dash_action_done_{row['lead_id']}"):
+        if cols[10].button("Done", key=f"dash_action_done_{row['lead_id']}"):
             complete_follow_up(row["lead_id"])
             st.rerun()
-        if cols[7].button("Snooze", key=f"dash_action_snooze_{row['lead_id']}"):
+        if cols[11].button("Snooze", key=f"dash_action_snooze_{row['lead_id']}"):
             snooze_follow_up(row["lead_id"], 7)
             st.rerun()
 
-    st.subheader("China Priority Leads")
-    if not data["china_priority_leads"]:
-        st.info("No China priority leads in the active queue.")
-    else:
-        header_cols = st.columns([2, 2, 1, 1, 1, 1])
-        header_cols[0].caption("Contact")
-        header_cols[1].caption("Company")
-        header_cols[2].caption("City")
-        header_cols[3].caption("Membership")
-        header_cols[4].caption("Status")
-        header_cols[5].caption("Score")
-    for row in data["china_priority_leads"]:
-        cols = st.columns([2, 2, 1, 1, 1, 1])
-        cols[0].write(row["contact_name"] or "No contact")
-        cols[1].write(row["organization_name"] or "No organization")
-        cols[2].write(row["city"] or "-")
-        cols[3].write(row["membership"] or "-")
-        cols[4].write(row["relationship_status"] or row["lead_status"] or "-")
-        with cols[5]:
-            priority_badge(row["priority_score"])
+    st.subheader("China Network")
+    china_network = pd.DataFrame(data["china_network"])
+    st.dataframe(china_network, use_container_width=True, hide_index=True)
 
     st.subheader("Overdue Follow-ups")
     show_mini_rows(data["overdue_followups"], "dash_overdue")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("Warm Relationships")
-        show_mini_rows(data["warm_relationships"], "dash_warm")
-    with col_b:
-        st.subheader("New Leads Needing First Touch")
-        show_mini_rows(data["new_leads_first_touch"], "dash_new")
+    st.subheader("Warm Relationships")
+    show_mini_rows(data["warm_relationships"], "dash_warm")
 
     st.subheader("Campaign Progress")
     st.dataframe(pd.DataFrame(data["campaign_progress"]), use_container_width=True, hide_index=True)
@@ -989,6 +1041,148 @@ def format_bytes(size_bytes):
             return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+def run_git_command(args, repo_path=None, timeout=30):
+    cwd = repo_path or Path.cwd()
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        shell=False,
+    )
+
+
+def git_output(result):
+    return "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
+
+
+def detect_git_error(message, repo_path):
+    lower = (message or "").lower()
+    lock_path = Path(repo_path) / ".git" / "index.lock" if repo_path else None
+    if lock_path and lock_path.exists():
+        return "Permission Error", "index.lock exists", "Close Git/Python processes or run backup_git.bat with force unlock."
+    if "permission denied" in lower or "access is denied" in lower:
+        return "Permission Error", message, "Run: attrib -R .git /S /D and icacls .git /grant %USERNAME%:F /T"
+    if "authentication failed" in lower or "could not read username" in lower:
+        return "Push Failed", message, "Check Git remote credentials or sign in to your Git provider."
+    if "could not resolve host" in lower or "failed to connect" in lower or "remote unavailable" in lower:
+        return "Push Failed", message, "Check internet connection and remote URL."
+    if message:
+        return "Push Failed", message, "Run backup_git.bat for detailed diagnostics."
+    return "", "", ""
+
+
+def get_git_health():
+    health = {
+        "repo_path": "",
+        "branch": "",
+        "remote_url": "",
+        "last_commit_hash": "",
+        "last_commit_time": "",
+        "last_push_time": "",
+        "status": "Push Failed",
+        "indicator": "Red",
+        "error_message": "",
+        "suggested_fix": "",
+        "uncommitted_changes": False,
+        "ahead": 0,
+        "behind": 0,
+    }
+
+    root_result = run_git_command(["git", "rev-parse", "--show-toplevel"])
+    if root_result.returncode != 0:
+        message = git_output(root_result)
+        health["error_message"] = message
+        health["suggested_fix"] = "Open the app from inside a Git repository."
+        return health
+
+    repo_path = Path(root_result.stdout.strip()).resolve()
+    health["repo_path"] = str(repo_path)
+
+    branch_result = run_git_command(["git", "branch", "--show-current"], repo_path)
+    remote_result = run_git_command(["git", "remote", "get-url", "origin"], repo_path)
+    commit_result = run_git_command(["git", "log", "-1", "--format=%H"], repo_path)
+    commit_time_result = run_git_command(["git", "log", "-1", "--format=%ci"], repo_path)
+    status_result = run_git_command(["git", "status", "--short"], repo_path)
+
+    health["branch"] = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    health["remote_url"] = remote_result.stdout.strip() if remote_result.returncode == 0 else ""
+    health["last_commit_hash"] = commit_result.stdout.strip() if commit_result.returncode == 0 else ""
+    health["last_commit_time"] = commit_time_result.stdout.strip() if commit_time_result.returncode == 0 else ""
+    health["uncommitted_changes"] = bool(status_result.stdout.strip()) if status_result.returncode == 0 else False
+
+    if status_result.returncode != 0:
+        message = git_output(status_result)
+        status, error, fix = detect_git_error(message, repo_path)
+        health["status"] = status or "Push Failed"
+        health["error_message"] = error
+        health["suggested_fix"] = fix
+        return health
+
+    branch = health["branch"]
+    if branch:
+        remote_ref = f"origin/{branch}"
+        push_time_result = run_git_command(["git", "log", "-1", "--format=%ci", remote_ref], repo_path)
+        if push_time_result.returncode == 0:
+            health["last_push_time"] = push_time_result.stdout.strip()
+
+        ahead_result = run_git_command(
+            ["git", "rev-list", "--left-right", "--count", f"HEAD...{remote_ref}"],
+            repo_path,
+        )
+        if ahead_result.returncode == 0:
+            parts = ahead_result.stdout.strip().split()
+            if len(parts) == 2:
+                health["ahead"] = int(parts[0])
+                health["behind"] = int(parts[1])
+        else:
+            message = git_output(ahead_result)
+            status, error, fix = detect_git_error(message, repo_path)
+            health["error_message"] = error
+            health["suggested_fix"] = fix
+
+    lock_status, lock_error, lock_fix = detect_git_error("", repo_path)
+    if lock_status == "Permission Error":
+        health["status"] = lock_status
+        health["indicator"] = "Red"
+        health["error_message"] = lock_error
+        health["suggested_fix"] = lock_fix
+        return health
+
+    if health["behind"] > 0:
+        health["status"] = "Behind Remote"
+        health["indicator"] = "Red"
+    elif health["ahead"] > 0:
+        health["status"] = "Ahead of Remote"
+        health["indicator"] = "Yellow"
+    elif health["uncommitted_changes"]:
+        health["status"] = "Ahead of Remote"
+        health["indicator"] = "Yellow"
+        health["error_message"] = "Uncommitted changes exist."
+        health["suggested_fix"] = "Run Backup Now to commit and push current work."
+    elif health["error_message"]:
+        health["status"] = "Push Failed"
+        health["indicator"] = "Red"
+    else:
+        health["status"] = "Synced"
+        health["indicator"] = "Green"
+
+    return health
+
+
+def render_git_indicator(indicator):
+    color = {"Green": "#2ecc71", "Yellow": "#ffcc00", "Red": "#ff5a5f"}.get(indicator, "#94a3b8")
+    st.markdown(
+        f"""
+        <div style="display:inline-block;background:{color};width:14px;height:14px;border-radius:50%;margin-right:8px;"></div>
+        <span style="font-weight:700;">{indicator}</span>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def show_admin():
@@ -1008,6 +1202,66 @@ def show_admin():
         st.caption(f"Latest backup: {status['latest_backup_name']}")
 
     st.divider()
+    st.subheader("Git Status")
+    git_health = get_git_health()
+    git_cols = st.columns(3)
+    git_cols[0].text_input("Repository Path", value=git_health["repo_path"], disabled=True)
+    git_cols[1].text_input("Current Branch", value=git_health["branch"], disabled=True)
+    git_cols[2].text_input("Remote URL", value=git_health["remote_url"], disabled=True)
+
+    git_cols2 = st.columns(4)
+    git_cols2[0].text_input("Last Commit Hash", value=git_health["last_commit_hash"], disabled=True)
+    git_cols2[1].text_input("Last Commit Time", value=git_health["last_commit_time"], disabled=True)
+    git_cols2[2].text_input("Last Push Time", value=git_health["last_push_time"], disabled=True)
+    with git_cols2[3]:
+        st.write("Status")
+        render_git_indicator(git_health["indicator"])
+        st.caption(git_health["status"])
+
+    if git_health["error_message"]:
+        st.error(git_health["error_message"])
+    if git_health["suggested_fix"]:
+        st.info(git_health["suggested_fix"])
+
+    if st.button("Backup Now", key="admin_backup_now"):
+        script_path = Path(git_health["repo_path"] or Path.cwd()) / "scripts" / "git_backup.py"
+        if not script_path.exists():
+            st.error(f"Backup script not found: {script_path}")
+        else:
+            with st.spinner("Running Git backup..."):
+                try:
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(script_path),
+                            "--message",
+                            "Auto backup CRM progress",
+                            "--force-unlock",
+                        ],
+                        cwd=git_health["repo_path"] or Path.cwd(),
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=300,
+                        shell=False,
+                    )
+                    output = git_output(result) or "No output."
+                    st.session_state.git_backup_output = output
+                    st.session_state.git_backup_returncode = result.returncode
+                    if result.returncode == 0:
+                        st.success("Git backup succeeded.")
+                    else:
+                        st.error("Git backup failed.")
+                except Exception as exc:
+                    st.session_state.git_backup_output = str(exc)
+                    st.session_state.git_backup_returncode = 1
+                    st.error(f"Git backup failed: {exc}")
+
+    if st.session_state.get("git_backup_output"):
+        st.caption("Backup output")
+        st.code(st.session_state.git_backup_output)
+
+    st.divider()
     st.subheader("System Settings")
     capacity_options = [10, 20, 30, 50]
     current_capacity = get_daily_outreach_capacity()
@@ -1020,6 +1274,48 @@ def show_admin():
         set_app_setting("daily_outreach_capacity", str(selected_capacity))
         st.success("Daily outreach capacity saved.")
         st.rerun()
+
+    st.divider()
+    st.subheader("Email Sending")
+    smtp_cols = st.columns(2)
+    smtp_host = smtp_cols[0].text_input("SMTP Host", value=get_app_setting("smtp_host", ""))
+    smtp_port = smtp_cols[1].text_input("SMTP Port", value=get_app_setting("smtp_port", "587"))
+    smtp_user = smtp_cols[0].text_input("SMTP Username", value=get_app_setting("smtp_username", ""))
+    smtp_password = smtp_cols[1].text_input("SMTP Password", value=get_app_setting("smtp_password", ""), type="password")
+    smtp_from_email = smtp_cols[0].text_input("From Email", value=get_app_setting("smtp_from_email", ""))
+    smtp_from_name = smtp_cols[1].text_input("From Name", value=get_app_setting("smtp_from_name", "1Aim"))
+    smtp_use_tls = st.checkbox("Use TLS", value=get_app_setting("smtp_use_tls", "1") == "1")
+    if st.button("Save Email Settings", key="save_smtp_settings"):
+        for key, value in [
+            ("smtp_host", smtp_host),
+            ("smtp_port", smtp_port),
+            ("smtp_username", smtp_user),
+            ("smtp_password", smtp_password),
+            ("smtp_from_email", smtp_from_email),
+            ("smtp_from_name", smtp_from_name),
+            ("smtp_use_tls", "1" if smtp_use_tls else "0"),
+        ]:
+            set_app_setting(key, value)
+        st.success("Email settings saved.")
+        st.rerun()
+
+    test_cols = st.columns([2, 1])
+    test_email = test_cols[0].text_input("Test Email To", key="smtp_test_email")
+    can_send_test = is_smtp_configured() and is_valid_email(test_email)
+    if test_cols[1].button("Send Test Email", disabled=not can_send_test, key="send_smtp_test_email"):
+        ok, error_message = send_email_via_smtp(
+            test_email.strip(),
+            "1Aim SMTP Test",
+            "This is a test email from 1Aim Growth Engine. SMTP sending is configured correctly.",
+        )
+        if ok:
+            st.success("Test email sent.")
+        else:
+            st.error(f"Test email failed: {error_message}")
+    if not is_smtp_configured():
+        st.caption("Save SMTP host and from email before sending a test email.")
+    elif test_email and not is_valid_email(test_email):
+        st.caption("Enter a valid test email address.")
 
     st.divider()
     st.subheader("CRM Activation")
@@ -1176,6 +1472,106 @@ def show_follow_up_queue():
                         st.rerun()
 
             st.divider()
+
+
+def show_outreach_campaigns():
+    st.title("Outreach Campaigns")
+    metrics = get_outreach_campaign_metrics()
+    if metrics:
+        st.subheader("Campaign Metrics")
+        st.dataframe(pd.DataFrame(metrics), use_container_width=True, hide_index=True)
+
+    st.subheader("Select Campaign Audience")
+    options = get_campaign_filter_options()
+    filter_cols = st.columns(5)
+    campaign_name = filter_cols[0].text_input("Campaign Name", value=st.session_state.get("outreach_campaign_name", "1Aim Vietnam Support"))
+    country = filter_cols[1].selectbox("Country", ["All"] + options["countries"])
+    membership = filter_cols[2].selectbox("Membership", ["All"] + options["memberships"])
+    lead_status = filter_cols[3].selectbox("Lead Status", ["All"] + options["lead_statuses"])
+    relationship_status = filter_cols[4].selectbox("Relationship Status", ["All"] + options["relationship_statuses"])
+    limit = st.selectbox("Audience Size", [30, 40, 50], index=2)
+
+    filters = {
+        "country": "" if country == "All" else country,
+        "membership": "" if membership == "All" else membership,
+        "lead_status": "" if lead_status == "All" else lead_status,
+        "relationship_status": "" if relationship_status == "All" else relationship_status,
+        "limit": limit,
+    }
+
+    if st.button("Generate Messages", key="generate_outreach_messages"):
+        audience = get_campaign_audience(filters)
+        drafts = []
+        for row in audience:
+            if not is_valid_email(row.get("email")):
+                continue
+            drafts.append(
+                {
+                    **row,
+                    "subject": generate_outreach_subject(row, campaign_name),
+                    "message_body": generate_outreach_message(row, campaign_name),
+                    "message_version": 1,
+                }
+            )
+        st.session_state.outreach_campaign_name = campaign_name
+        st.session_state.outreach_campaign_filters = filters
+        st.session_state.outreach_campaign_drafts = drafts
+        st.success(f"Generated {len(drafts)} personalized messages.")
+        st.rerun()
+
+    drafts = st.session_state.get("outreach_campaign_drafts", [])
+    if not drafts:
+        st.info("Choose filters and generate messages to start a campaign.")
+        return
+
+    st.subheader("Review Messages")
+    st.caption(f"{len(drafts)} contacts selected. Review and edit before sending.")
+
+    edited_messages = []
+    for index, draft in enumerate(drafts):
+        label = f"{draft.get('contact_name') or 'No contact'} - {draft.get('organization_name') or 'No company'}"
+        with st.expander(label, expanded=index < 3):
+            st.caption(f"{draft.get('email')} | {draft.get('city') or '-'} / {draft.get('country') or '-'} | {draft.get('job_title') or '-'}")
+            subject = st.text_input(
+                "Subject",
+                value=draft["subject"],
+                key=f"outreach_subject_{draft['lead_id']}",
+            )
+            message_body = st.text_area(
+                "Message Preview",
+                value=draft["message_body"],
+                height=220,
+                key=f"outreach_body_{draft['lead_id']}",
+            )
+            edited_messages.append(
+                {
+                    **draft,
+                    "subject": subject,
+                    "message_body": message_body,
+                    "message_version": draft.get("message_version", 1),
+                }
+            )
+
+    st.subheader("Approve Campaign")
+    if not is_smtp_configured():
+        st.warning("Email sending is not configured. Add SMTP settings in Admin before approving the campaign.")
+
+    approve_disabled = not is_smtp_configured() or not edited_messages or not campaign_name.strip()
+    if st.button("Approve & Send", type="primary", disabled=approve_disabled, key="approve_outreach_campaign"):
+        result = create_and_send_outreach_campaign(
+            campaign_name.strip(),
+            st.session_state.get("outreach_campaign_filters", filters),
+            edited_messages,
+        )
+        st.session_state.pop("outreach_campaign_drafts", None)
+        st.success(
+            f"Campaign sent. Sent: {result['sent']}. Failed: {result['failed']}."
+        )
+        st.rerun()
+
+    if st.button("Clear Campaign Draft", key="clear_outreach_campaign"):
+        st.session_state.pop("outreach_campaign_drafts", None)
+        st.rerun()
 
 
 def show_occasion_reminders():
@@ -1363,6 +1759,191 @@ def show_occasion_reminders():
                 st.rerun()
 
             st.divider()
+
+
+def money_display(value):
+    try:
+        return f"${float(value or 0):,.0f}"
+    except (TypeError, ValueError):
+        return "$0"
+
+
+def show_opportunities():
+    if st.session_state.get("selected_opportunity_id"):
+        show_opportunity_detail(st.session_state.selected_opportunity_id)
+        return
+
+    st.title("Opportunities")
+    dashboard = get_opportunity_dashboard_data()
+
+    kpi_cols = st.columns(6)
+    kpi_cols[0].metric("Total Opportunities", dashboard["total_opportunities"])
+    for col, stage in zip(kpi_cols[1:], ["Interested", "Quoted", "Negotiation", "Won", "Lost"]):
+        col.metric(stage, dashboard["stage_counts"].get(stage, 0))
+
+    revenue_cols = st.columns(3)
+    revenue_cols[0].metric("Total Pipeline Value", money_display(dashboard["total_pipeline_value"]))
+    revenue_cols[1].metric("Negotiation Value", money_display(dashboard["negotiation_value"]))
+    revenue_cols[2].metric("Won Value", money_display(dashboard["won_value"]))
+
+    st.subheader("Create Opportunity")
+    leads = get_leads()
+    lead_options = {"No linked lead": None}
+    for lead in leads:
+        label = (
+            f"#{lead['id']} - "
+            f"{lead['company_name'] or 'No organization'} - "
+            f"{lead['contact_person'] or 'No contact'}"
+        )
+        lead_options[label] = lead
+
+    with st.expander("New Opportunity", expanded=False):
+        selected_label = st.selectbox("Link to Lead", list(lead_options.keys()), key="new_opp_lead")
+        selected_lead = lead_options[selected_label]
+        default_name = ""
+        if selected_lead:
+            default_name = f"{selected_lead['company_name'] or 'Opportunity'} - {selected_lead['contact_person'] or 'Freight opportunity'}"
+        opportunity_name = st.text_input("Opportunity Name", value=default_name, key="new_opp_name")
+        create_cols = st.columns(3)
+        stage = create_cols[0].selectbox("Stage", OPPORTUNITY_STAGES, key="new_opp_stage")
+        trade_lane = create_cols[1].text_input("Trade Lane", key="new_opp_lane")
+        service_type = create_cols[2].text_input("Service Type", key="new_opp_service")
+        value_cols = st.columns(4)
+        potential_revenue = value_cols[0].text_input("Potential Revenue", key="new_opp_revenue")
+        potential_profit = value_cols[1].text_input("Potential Profit", key="new_opp_profit")
+        expected_close_date = value_cols[2].text_input("Expected Close Date", placeholder="YYYY-MM-DD", key="new_opp_close")
+        next_action_date = value_cols[3].text_input("Next Action Date", placeholder="YYYY-MM-DD", key="new_opp_next_date")
+        next_action = st.text_input("Next Action", key="new_opp_next_action")
+        notes = st.text_area("Notes", key="new_opp_notes")
+        if st.button("Create Opportunity", type="primary", key="create_opportunity"):
+            opportunity_id = save_opportunity(
+                {
+                    "opportunity_name": opportunity_name,
+                    "organization_id": selected_lead["organization_id"] if selected_lead else None,
+                    "contact_id": selected_lead["contact_id"] if selected_lead else None,
+                    "owner": None,
+                    "stage": stage,
+                    "trade_lane": trade_lane,
+                    "service_type": service_type,
+                    "potential_revenue": potential_revenue,
+                    "potential_profit": potential_profit,
+                    "expected_close_date": expected_close_date,
+                    "next_action": next_action,
+                    "next_action_date": next_action_date,
+                    "notes": notes,
+                }
+            )
+            st.session_state.selected_opportunity_id = opportunity_id
+            st.rerun()
+
+    opportunities = get_opportunities()
+    st.subheader("Opportunity List")
+    if not opportunities:
+        st.info("No opportunities yet.")
+        return
+
+    header = st.columns([2, 2, 1, 1, 1, 1, 1])
+    header[0].caption("Opportunity")
+    header[1].caption("Organization")
+    header[2].caption("Stage")
+    header[3].caption("Trade Lane")
+    header[4].caption("Revenue")
+    header[5].caption("Next Action")
+    header[6].caption("Open")
+    for opportunity in opportunities:
+        cols = st.columns([2, 2, 1, 1, 1, 1, 1])
+        cols[0].write(opportunity["display_name"] or "Untitled")
+        cols[1].write(opportunity.get("organization_name") or "-")
+        cols[2].write(opportunity["stage"])
+        cols[3].write(opportunity.get("trade_lane") or "-")
+        cols[4].write(money_display(opportunity.get("potential_revenue")))
+        cols[5].write(opportunity.get("next_action") or "-")
+        if cols[6].button("Open", key=f"open_opp_{opportunity['id']}"):
+            st.session_state.selected_opportunity_id = opportunity["id"]
+            st.rerun()
+
+
+def show_opportunity_detail(opportunity_id):
+    opportunity = get_opportunity_detail(opportunity_id)
+    if not opportunity:
+        st.warning("Opportunity not found.")
+        if st.button("Back to Opportunities"):
+            st.session_state.selected_opportunity_id = None
+            st.session_state.pending_page = "Opportunities"
+            st.rerun()
+        return
+
+    if st.button("Back to Opportunities"):
+        st.session_state.selected_opportunity_id = None
+        st.session_state.pending_page = "Opportunities"
+        st.rerun()
+
+    st.title(opportunity["display_name"] or "Opportunity")
+    st.caption(" | ".join(item for item in [
+        opportunity.get("organization_name"),
+        opportunity.get("contact_name"),
+        opportunity.get("trade_lane"),
+    ] if item))
+
+    kpi_cols = st.columns(4)
+    kpi_cols[0].metric("Stage", opportunity["stage"])
+    kpi_cols[1].metric("Potential Revenue", money_display(opportunity.get("potential_revenue")))
+    kpi_cols[2].metric("Potential Profit", money_display(opportunity.get("potential_profit")))
+    kpi_cols[3].metric("Expected Close", opportunity.get("expected_close_date") or "-")
+
+    st.subheader("Stage")
+    stage_cols = st.columns(len(OPPORTUNITY_STAGES))
+    for col, stage in zip(stage_cols, OPPORTUNITY_STAGES):
+        if col.button(stage, key=f"opp_stage_{stage}_{opportunity_id}"):
+            update_opportunity_stage(opportunity_id, stage)
+            st.rerun()
+
+    st.subheader("Details")
+    name = st.text_input("Opportunity Name", value=opportunity.get("display_name") or "")
+    field_cols = st.columns(3)
+    stage = field_cols[0].selectbox(
+        "Stage",
+        OPPORTUNITY_STAGES,
+        index=OPPORTUNITY_STAGES.index(opportunity["stage"]) if opportunity["stage"] in OPPORTUNITY_STAGES else 0,
+    )
+    trade_lane = field_cols[1].text_input("Trade Lane", value=opportunity.get("trade_lane") or "")
+    service_type = field_cols[2].text_input("Service Type", value=opportunity.get("service_type") or "")
+    value_cols = st.columns(4)
+    potential_revenue = value_cols[0].text_input("Potential Revenue", value=str(opportunity.get("potential_revenue") or ""))
+    potential_profit = value_cols[1].text_input("Potential Profit", value=str(opportunity.get("potential_profit") or ""))
+    expected_close_date = value_cols[2].text_input("Expected Close Date", value=opportunity.get("expected_close_date") or "")
+    next_action_date = value_cols[3].text_input("Next Action Date", value=opportunity.get("next_action_date") or "")
+    next_action = st.text_input("Next Action", value=opportunity.get("next_action") or "")
+    notes = st.text_area("Notes", value=opportunity.get("notes") or "", height=180)
+
+    if st.button("Save Opportunity", type="primary", key=f"save_opp_{opportunity_id}"):
+        save_opportunity(
+            {
+                "opportunity_name": name,
+                "organization_id": opportunity.get("organization_id"),
+                "contact_id": opportunity.get("contact_id"),
+                "owner": opportunity.get("owner"),
+                "stage": stage,
+                "trade_lane": trade_lane,
+                "service_type": service_type,
+                "potential_revenue": potential_revenue,
+                "potential_profit": potential_profit,
+                "expected_close_date": expected_close_date,
+                "next_action": next_action,
+                "next_action_date": next_action_date,
+                "notes": notes,
+            },
+            opportunity_id,
+        )
+        st.success("Opportunity saved.")
+        st.rerun()
+
+    st.subheader("Activity")
+    if not opportunity.get("activities"):
+        st.info("No opportunity activity yet.")
+    for activity in opportunity.get("activities", []):
+        st.markdown(f"**{activity.get('activity_at') or activity.get('created_at')}** - {activity.get('activity_type')}")
+        st.write(activity.get("description") or activity.get("summary") or "")
 
 
 def show_quick_capture():
@@ -1845,6 +2426,9 @@ def show_lead_detail(lead_id):
     organization = detail["organization"]
     contact = detail["contact"]
     activities = detail.get("activities", [])
+    data_quality = detail.get("data_quality", {})
+    relationship_health = detail.get("relationship_health", {})
+    missing_data = detail.get("missing_data", {})
     edit_key = f"lead_detail_edit_{lead_id}"
 
     contact_name = detail_value(contact, "name") or detail_value(lead, "contact_person") or "No contact linked"
@@ -1954,10 +2538,47 @@ def show_lead_detail(lead_id):
     )
 
     with overview_tab:
-        status_cols = st.columns(3)
+        status_cols = st.columns(5)
         status_cols[0].metric("Lead Status", lead_status)
         status_cols[1].metric("Relationship Status", relationship_status or "No contact linked")
         status_cols[2].metric("Customer Status", customer_status or "No organization linked")
+        status_cols[3].metric("Data Quality", f"{data_quality.get('overall_score', 0)}%")
+        status_cols[4].metric(
+            "Relationship Health",
+            f"{relationship_health.get('score', 0)}%",
+            delta=relationship_health.get("label", ""),
+        )
+
+        quality_cols = st.columns(3)
+        quality_cols[0].metric("Contact Completeness", f"{data_quality.get('contact_score', 0)}%")
+        quality_cols[1].metric("Organization Completeness", f"{data_quality.get('organization_score', 0)}%")
+        with quality_cols[2]:
+            with st.popover("Health Details"):
+                st.write(f"Status: {relationship_health.get('label', '-')}")
+                st.write(f"Last contact: {relationship_health.get('last_contacted_at') or '-'}")
+                st.write(f"Next follow-up: {relationship_health.get('next_follow_up_at') or '-'}")
+                st.write("Score components:")
+                for item in relationship_health.get("components", []):
+                    st.write(f"+{item['points']} {item['label']}")
+
+        st.subheader("Missing Data Checklist")
+        checklist_cols = st.columns(2)
+        contact_missing = missing_data.get("contact", [])
+        organization_missing = missing_data.get("organization", [])
+        with checklist_cols[0]:
+            st.markdown("**Contact**")
+            if contact_missing:
+                for item in contact_missing:
+                    st.checkbox(item["label"], value=False, disabled=True, key=f"missing_contact_{lead_id}_{item['field']}")
+            else:
+                st.success("Contact data complete.")
+        with checklist_cols[1]:
+            st.markdown("**Organization**")
+            if organization_missing:
+                for item in organization_missing:
+                    st.checkbox(item["label"], value=False, disabled=True, key=f"missing_org_{lead_id}_{item['field']}")
+            else:
+                st.success("Organization data complete.")
 
         st.subheader("Communication")
         render_comm_actions()
@@ -1974,6 +2595,42 @@ def show_lead_detail(lead_id):
             complete_follow_up(lead_id)
             st.success("Follow-up completed.")
             st.rerun()
+
+        with st.popover("Create Opportunity"):
+            default_opp_name = f"{organization_name} - {contact_name}"
+            opp_name = st.text_input("Opportunity Name", value=default_opp_name, key=f"lead_opp_name_{lead_id}")
+            opp_cols = st.columns(3)
+            opp_stage = opp_cols[0].selectbox("Stage", OPPORTUNITY_STAGES, key=f"lead_opp_stage_{lead_id}")
+            opp_lane = opp_cols[1].text_input("Trade Lane", key=f"lead_opp_lane_{lead_id}")
+            opp_service = opp_cols[2].text_input("Service Type", key=f"lead_opp_service_{lead_id}")
+            opp_value_cols = st.columns(4)
+            opp_revenue = opp_value_cols[0].text_input("Potential Revenue", key=f"lead_opp_revenue_{lead_id}")
+            opp_profit = opp_value_cols[1].text_input("Potential Profit", key=f"lead_opp_profit_{lead_id}")
+            opp_close = opp_value_cols[2].text_input("Expected Close Date", placeholder="YYYY-MM-DD", key=f"lead_opp_close_{lead_id}")
+            opp_next_date = opp_value_cols[3].text_input("Next Action Date", placeholder="YYYY-MM-DD", key=f"lead_opp_next_date_{lead_id}")
+            opp_next = st.text_input("Next Action", key=f"lead_opp_next_{lead_id}")
+            opp_notes = st.text_area("Notes", key=f"lead_opp_notes_{lead_id}")
+            if st.button("Save Opportunity", type="primary", key=f"lead_opp_save_{lead_id}"):
+                opportunity_id = save_opportunity(
+                    {
+                        "opportunity_name": opp_name,
+                        "organization_id": detail_value(lead, "organization_id"),
+                        "contact_id": detail_value(lead, "contact_id"),
+                        "owner": None,
+                        "stage": opp_stage,
+                        "trade_lane": opp_lane,
+                        "service_type": opp_service,
+                        "potential_revenue": opp_revenue,
+                        "potential_profit": opp_profit,
+                        "expected_close_date": opp_close,
+                        "next_action": opp_next,
+                        "next_action_date": opp_next_date,
+                        "notes": opp_notes,
+                    }
+                )
+                st.session_state.selected_opportunity_id = opportunity_id
+                st.session_state.pending_page = "Opportunities"
+                st.rerun()
 
         st.subheader("Relationship Actions")
         render_status_actions()
@@ -2299,7 +2956,7 @@ with st.sidebar:
 
     page = st.radio(
         "Menu",
-        ["Dashboard", "Follow-up Queue", "Occasion Reminders", "Quick Capture", "Leads Import", "Leads List", "Admin"],
+        ["Dashboard", "Follow-up Queue", "Opportunities", "Outreach Campaigns", "Occasion Reminders", "Quick Capture", "Leads Import", "Leads List", "Admin"],
         key="page",
     )
 
@@ -2309,6 +2966,10 @@ if page == "Dashboard":
     show_dashboard()
 elif page == "Follow-up Queue":
     show_follow_up_queue()
+elif page == "Opportunities":
+    show_opportunities()
+elif page == "Outreach Campaigns":
+    show_outreach_campaigns()
 elif page == "Occasion Reminders":
     show_occasion_reminders()
 elif page == "Quick Capture":
