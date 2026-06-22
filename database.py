@@ -275,13 +275,85 @@ def init_db():
         currency TEXT DEFAULT 'USD',
         sell_amount REAL,
         status TEXT DEFAULT 'draft',
+        template_name TEXT,
+        version INTEGER DEFAULT 1,
+        parent_quotation_id INTEGER,
+        customer_name TEXT,
+        contact_name TEXT,
+        trade_lane TEXT,
+        service_type TEXT,
+        payment_terms TEXT,
+        prepared_by TEXT,
+        approved_at TEXT,
+        approved_by TEXT,
+        sent_at TEXT,
         owner INTEGER,
         follow_up_date TEXT,
         notes TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(owner) REFERENCES users(id),
+        FOREIGN KEY(parent_quotation_id) REFERENCES quotations(id),
         FOREIGN KEY(opportunity_id) REFERENCES opportunities(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS quotation_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        quotation_id INTEGER NOT NULL,
+        line_no INTEGER DEFAULT 1,
+        description TEXT NOT NULL,
+        basis TEXT,
+        quantity REAL DEFAULT 1,
+        unit_price REAL DEFAULT 0,
+        currency TEXT DEFAULT 'USD',
+        amount REAL DEFAULT 0,
+        cost_amount REAL DEFAULT 0,
+        margin_amount REAL DEFAULT 0,
+        vendor_name TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(quotation_id) REFERENCES quotations(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS quotation_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_name TEXT NOT NULL UNIQUE,
+        header_text TEXT,
+        footer_text TEXT,
+        payment_terms TEXT,
+        validity_days INTEGER DEFAULT 14,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS vendor_rates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        opportunity_id INTEGER NOT NULL,
+        quotation_id INTEGER,
+        vendor_type TEXT NOT NULL,
+        vendor_name TEXT,
+        charge_type TEXT,
+        charge_name TEXT NOT NULL,
+        basis TEXT,
+        currency TEXT DEFAULT 'USD',
+        cost_amount REAL DEFAULT 0,
+        margin_percent REAL DEFAULT 0,
+        margin_amount REAL DEFAULT 0,
+        suggested_sell_amount REAL DEFAULT 0,
+        transit_time TEXT,
+        valid_until TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(opportunity_id) REFERENCES opportunities(id),
+        FOREIGN KEY(quotation_id) REFERENCES quotations(id)
     )
     """)
 
@@ -619,6 +691,34 @@ def init_db():
     add_column("opportunities", "notes TEXT")
     add_column("opportunities", "owner INTEGER")
     add_column("quotations", "owner INTEGER")
+    add_column("quotations", "template_name TEXT")
+    add_column("quotations", "version INTEGER DEFAULT 1")
+    add_column("quotations", "parent_quotation_id INTEGER")
+    add_column("quotations", "customer_name TEXT")
+    add_column("quotations", "contact_name TEXT")
+    add_column("quotations", "trade_lane TEXT")
+    add_column("quotations", "service_type TEXT")
+    add_column("quotations", "payment_terms TEXT")
+    add_column("quotations", "prepared_by TEXT")
+    add_column("quotations", "approved_at TEXT")
+    add_column("quotations", "approved_by TEXT")
+    add_column("quotations", "sent_at TEXT")
+    add_column("vendor_rates", "quotation_id INTEGER")
+    add_column("vendor_rates", "vendor_type TEXT")
+    add_column("vendor_rates", "vendor_name TEXT")
+    add_column("vendor_rates", "charge_type TEXT")
+    add_column("vendor_rates", "charge_name TEXT")
+    add_column("vendor_rates", "basis TEXT")
+    add_column("vendor_rates", "currency TEXT DEFAULT 'USD'")
+    add_column("vendor_rates", "cost_amount REAL DEFAULT 0")
+    add_column("vendor_rates", "margin_percent REAL DEFAULT 0")
+    add_column("vendor_rates", "margin_amount REAL DEFAULT 0")
+    add_column("vendor_rates", "suggested_sell_amount REAL DEFAULT 0")
+    add_column("vendor_rates", "transit_time TEXT")
+    add_column("vendor_rates", "valid_until TEXT")
+    add_column("vendor_rates", "notes TEXT")
+    add_column("vendor_rates", "created_at TEXT DEFAULT CURRENT_TIMESTAMP")
+    add_column("vendor_rates", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
     add_column("organizations", "type TEXT DEFAULT 'Other'")
     add_column("organizations", "country TEXT")
     add_column("organizations", "province TEXT")
@@ -777,6 +877,7 @@ def init_db():
     migrate_crm_records(cur)
     seed_holiday_library(cur)
     seed_knowledge_base(cur)
+    seed_quotation_templates(cur)
     cur.execute(
         """
         INSERT OR IGNORE INTO app_settings (setting_key, setting_value, updated_at)
@@ -879,6 +980,18 @@ def parse_money(value):
         return float(str(value).replace(",", "").strip())
     except ValueError:
         return 0.0
+
+
+def calculate_suggested_sell_rate(cost_amount, margin_percent=0, margin_amount=0):
+    cost = parse_money(cost_amount)
+    percent_margin = cost * parse_money(margin_percent) / 100
+    fixed_margin = parse_money(margin_amount)
+    total_margin = percent_margin + fixed_margin
+    return {
+        "cost_amount": round(cost, 2),
+        "margin_amount": round(total_margin, 2),
+        "suggested_sell_amount": round(cost + total_margin, 2),
+    }
 
 
 def row_value(row, key, default=""):
@@ -1914,6 +2027,30 @@ def seed_knowledge_base(cur):
                 "This sample case exists to demonstrate structure. Confidence should remain low until legal basis is added.",
             ),
         )
+
+
+def seed_quotation_templates(cur):
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO quotation_templates (
+            template_name,
+            header_text,
+            footer_text,
+            payment_terms,
+            validity_days,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (
+            "Standard Freight Quote",
+            "Thank you for your inquiry. Please find our quotation below.",
+            "Rates are subject to space, equipment, and final cargo details at booking.",
+            "Payment before cargo release unless otherwise agreed.",
+            14,
+        ),
+    )
 
 
 def migrate_crm_records(cur):
@@ -4488,6 +4625,869 @@ def update_opportunity_stage(opportunity_id, stage, user="admin"):
             """,
             (opportunity["organization_id"],),
         )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_vendor_rates(opportunity_id=None):
+    conn = get_connection()
+    params = []
+    where_clause = ""
+    if opportunity_id:
+        where_clause = "WHERE vendor_rates.opportunity_id = ?"
+        params.append(opportunity_id)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            vendor_rates.*,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_name
+        FROM vendor_rates
+        LEFT JOIN opportunities ON opportunities.id = vendor_rates.opportunity_id
+        {where_clause}
+        ORDER BY vendor_rates.updated_at DESC, vendor_rates.id DESC
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_vendor_rate(record, rate_id=None, user="admin"):
+    clean_record = {key: clean_value(value) for key, value in (record or {}).items()}
+    opportunity_id = clean_record.get("opportunity_id")
+    if not opportunity_id:
+        return None
+
+    cost_amount = parse_money(clean_record.get("cost_amount"))
+    margin_percent = parse_money(clean_record.get("margin_percent"))
+    fixed_margin = parse_money(clean_record.get("margin_amount"))
+    calculated = calculate_suggested_sell_rate(cost_amount, margin_percent, fixed_margin)
+    vendor_type = clean_record.get("vendor_type") or "Carrier"
+    charge_name = clean_record.get("charge_name") or "Freight"
+
+    conn = get_connection()
+    cur = conn.cursor()
+    opportunity = cur.execute(
+        """
+        SELECT organization_id, contact_id
+        FROM opportunities
+        WHERE id = ?
+        """,
+        (opportunity_id,),
+    ).fetchone()
+    if not opportunity:
+        conn.close()
+        return None
+
+    values = (
+        opportunity_id,
+        clean_record.get("quotation_id") or None,
+        vendor_type,
+        clean_record.get("vendor_name"),
+        clean_record.get("charge_type") or vendor_type,
+        charge_name,
+        clean_record.get("basis"),
+        clean_record.get("currency") or "USD",
+        calculated["cost_amount"],
+        margin_percent,
+        fixed_margin,
+        calculated["suggested_sell_amount"],
+        clean_record.get("transit_time"),
+        clean_record.get("valid_until"),
+        clean_record.get("notes"),
+    )
+
+    if rate_id:
+        cur.execute(
+            """
+            UPDATE vendor_rates
+            SET opportunity_id = ?,
+                quotation_id = ?,
+                vendor_type = ?,
+                vendor_name = ?,
+                charge_type = ?,
+                charge_name = ?,
+                basis = ?,
+                currency = ?,
+                cost_amount = ?,
+                margin_percent = ?,
+                margin_amount = ?,
+                suggested_sell_amount = ?,
+                transit_time = ?,
+                valid_until = ?,
+                notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            values + (rate_id,),
+        )
+        saved_id = rate_id
+        action = "updated"
+    else:
+        cur.execute(
+            """
+            INSERT INTO vendor_rates (
+                opportunity_id,
+                quotation_id,
+                vendor_type,
+                vendor_name,
+                charge_type,
+                charge_name,
+                basis,
+                currency,
+                cost_amount,
+                margin_percent,
+                margin_amount,
+                suggested_sell_amount,
+                transit_time,
+                valid_until,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            values,
+        )
+        saved_id = cur.lastrowid
+        action = "added"
+
+    log_crm_activity(
+        cur,
+        "Pricing Update",
+        f"Pricing line {action}: {vendor_type} - {charge_name}",
+        opportunity_id=opportunity_id,
+        organization_id=opportunity["organization_id"],
+        contact_id=opportunity["contact_id"],
+        user=user,
+    )
+    conn.commit()
+    conn.close()
+    return saved_id
+
+
+def get_pricing_summary(opportunity_id):
+    rates = get_vendor_rates(opportunity_id)
+    totals = {}
+    local_totals = {}
+    for rate in rates:
+        currency = rate.get("currency") or "USD"
+        vendor_type = rate.get("vendor_type") or "Unknown"
+        vendor_name = rate.get("vendor_name") or vendor_type
+        if vendor_type == "Local Charge":
+            vendor_name = "Local Charges"
+        key = (currency, vendor_type, vendor_name)
+        if key not in totals:
+            totals[key] = {
+                "currency": currency,
+                "vendor_type": vendor_type,
+                "vendor_name": vendor_name,
+                "line_count": 0,
+                "cost_total": 0.0,
+                "margin_total": 0.0,
+                "suggested_sell_total": 0.0,
+                "transit_times": [],
+                "valid_until": "",
+            }
+        cost = float(rate.get("cost_amount") or 0)
+        suggested = float(rate.get("suggested_sell_amount") or 0)
+        totals[key]["line_count"] += 1
+        totals[key]["cost_total"] += cost
+        totals[key]["suggested_sell_total"] += suggested
+        totals[key]["margin_total"] += suggested - cost
+        if rate.get("transit_time"):
+            totals[key]["transit_times"].append(rate["transit_time"])
+        if rate.get("valid_until"):
+            current_valid_until = totals[key]["valid_until"]
+            if not current_valid_until or rate["valid_until"] < current_valid_until:
+                totals[key]["valid_until"] = rate["valid_until"]
+        if vendor_type == "Local Charge":
+            if currency not in local_totals:
+                local_totals[currency] = {
+                    "line_count": 0,
+                    "cost_total": 0.0,
+                    "margin_total": 0.0,
+                    "suggested_sell_total": 0.0,
+                }
+            local_totals[currency]["line_count"] += 1
+            local_totals[currency]["cost_total"] += cost
+            local_totals[currency]["margin_total"] += suggested - cost
+            local_totals[currency]["suggested_sell_total"] += suggested
+
+    comparisons = []
+    has_vendor_options = any(item["vendor_type"] != "Local Charge" for item in totals.values())
+    for item in totals.values():
+        if item["vendor_type"] == "Local Charge" and has_vendor_options:
+            continue
+        local = local_totals.get(item["currency"])
+        if item["vendor_type"] != "Local Charge" and local:
+            item["line_count"] += local["line_count"]
+            item["cost_total"] += local["cost_total"]
+            item["margin_total"] += local["margin_total"]
+            item["suggested_sell_total"] += local["suggested_sell_total"]
+        item["cost_total"] = round(item["cost_total"], 2)
+        item["margin_total"] = round(item["margin_total"], 2)
+        item["suggested_sell_total"] = round(item["suggested_sell_total"], 2)
+        item["margin_percent"] = round((item["margin_total"] / item["cost_total"]) * 100, 2) if item["cost_total"] else 0
+        item["transit_time"] = ", ".join(dict.fromkeys(item["transit_times"]))
+        del item["transit_times"]
+        comparisons.append(item)
+
+    comparisons = sorted(
+        comparisons,
+        key=lambda item: (
+            item["currency"],
+            item["suggested_sell_total"],
+            item["vendor_type"],
+            item["vendor_name"],
+        ),
+    )
+    best_by_currency = {}
+    for item in comparisons:
+        best_by_currency.setdefault(item["currency"], item)
+
+    return {
+        "rates": rates,
+        "comparisons": comparisons,
+        "best_by_currency": best_by_currency,
+    }
+
+
+def apply_pricing_summary_to_opportunity(opportunity_id, currency="USD", user="admin"):
+    summary = get_pricing_summary(opportunity_id)
+    best = summary["best_by_currency"].get(currency)
+    if not best:
+        return False
+
+    conn = get_connection()
+    cur = conn.cursor()
+    opportunity = cur.execute(
+        """
+        SELECT organization_id, contact_id
+        FROM opportunities
+        WHERE id = ?
+        """,
+        (opportunity_id,),
+    ).fetchone()
+    if not opportunity:
+        conn.close()
+        return False
+
+    cur.execute(
+        """
+        UPDATE opportunities
+        SET potential_revenue = ?,
+            potential_profit = ?,
+            next_action = COALESCE(NULLIF(next_action, ''), 'Prepare quotation'),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            best["suggested_sell_total"],
+            best["margin_total"],
+            opportunity_id,
+        ),
+    )
+    log_crm_activity(
+        cur,
+        "Pricing Update",
+        (
+            "Applied suggested sell rate to opportunity: "
+            f"{currency} {best['suggested_sell_total']:,.2f} "
+            f"with margin {best['margin_total']:,.2f}"
+        ),
+        opportunity_id=opportunity_id,
+        organization_id=opportunity["organization_id"],
+        contact_id=opportunity["contact_id"],
+        user=user,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_quotation_templates():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM quotation_templates
+        ORDER BY template_name
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_quotation_template(template_name, header_text="", footer_text="", payment_terms="", validity_days=14):
+    clean_name = clean_value(template_name)
+    if not clean_name:
+        return None
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO quotation_templates (
+            template_name,
+            header_text,
+            footer_text,
+            payment_terms,
+            validity_days,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(template_name) DO UPDATE SET
+            header_text = excluded.header_text,
+            footer_text = excluded.footer_text,
+            payment_terms = excluded.payment_terms,
+            validity_days = excluded.validity_days,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            clean_name,
+            clean_value(header_text),
+            clean_value(footer_text),
+            clean_value(payment_terms),
+            int(parse_money(validity_days) or 14),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return clean_name
+
+
+def generate_quote_no(cur):
+    quote_no_prefix = date.today().strftime("%y%m")
+    latest_quote = cur.execute(
+        """
+        SELECT quote_no
+        FROM quotations
+        WHERE quote_no LIKE ?
+        ORDER BY quote_no DESC
+        LIMIT 1
+        """,
+        (quote_no_prefix + "%",),
+    ).fetchone()
+    if latest_quote and latest_quote["quote_no"]:
+        try:
+            next_quote_number = int(latest_quote["quote_no"][4:]) + 1
+        except ValueError:
+            next_quote_number = 1
+    else:
+        next_quote_number = 1
+    return quote_no_prefix + f"{next_quote_number:02d}"
+
+
+def quote_status_label(status):
+    value = normalize(status)
+    return {
+        "draft": "Draft",
+        "pending approval": "Pending Approval",
+        "pending_approval": "Pending Approval",
+        "approved": "Approved",
+        "sent": "Sent",
+        "rejected": "Rejected",
+    }.get(value, "Draft")
+
+
+def calculate_quotation_totals(items):
+    total = 0.0
+    cost_total = 0.0
+    for item in items or []:
+        quantity = parse_money(item.get("quantity") or 1) or 1
+        unit_price = parse_money(item.get("unit_price"))
+        amount = parse_money(item.get("amount"))
+        if not amount:
+            amount = quantity * unit_price
+        total += amount
+        cost_total += parse_money(item.get("cost_amount"))
+    return {
+        "sell_amount": round(total, 2),
+        "cost_amount": round(cost_total, 2),
+        "margin_amount": round(total - cost_total, 2),
+    }
+
+
+def get_quotations():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            quotations.*,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_name,
+            organizations.name AS organization_name,
+            contacts.name AS crm_contact_name
+        FROM quotations
+        LEFT JOIN opportunities ON opportunities.id = quotations.opportunity_id
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+        ORDER BY quotations.updated_at DESC, quotations.id DESC
+        """
+    ).fetchall()
+    conn.close()
+    quotations = []
+    for row in rows:
+        item = dict(row)
+        item["status"] = quote_status_label(item.get("status"))
+        item["customer_name"] = item.get("customer_name") or item.get("organization_name") or ""
+        item["contact_name"] = item.get("contact_name") or item.get("crm_contact_name") or ""
+        quotations.append(item)
+    return quotations
+
+
+def get_quotation_detail(quotation_id):
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT
+            quotations.*,
+            quotation_templates.header_text,
+            quotation_templates.footer_text,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_name,
+            opportunities.organization_id,
+            opportunities.contact_id,
+            organizations.name AS organization_name,
+            contacts.name AS crm_contact_name,
+            contacts.email AS contact_email
+        FROM quotations
+        LEFT JOIN quotation_templates ON quotation_templates.template_name = quotations.template_name
+        LEFT JOIN opportunities ON opportunities.id = quotations.opportunity_id
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+        WHERE quotations.id = ?
+        """,
+        (quotation_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    items = conn.execute(
+        """
+        SELECT *
+        FROM quotation_items
+        WHERE quotation_id = ?
+        ORDER BY line_no, id
+        """,
+        (quotation_id,),
+    ).fetchall()
+    activities = conn.execute(
+        """
+        SELECT *
+        FROM activities
+        WHERE quotation_id = ?
+        ORDER BY COALESCE(activity_at, created_at) DESC, id DESC
+        """,
+        (quotation_id,),
+    ).fetchall()
+    conn.close()
+    detail = dict(row)
+    detail["status"] = quote_status_label(detail.get("status"))
+    detail["customer_name"] = detail.get("customer_name") or detail.get("organization_name") or ""
+    detail["contact_name"] = detail.get("contact_name") or detail.get("crm_contact_name") or ""
+    detail["items"] = [dict(item) for item in items]
+    detail["activities"] = [dict(activity) for activity in activities]
+    detail["totals"] = calculate_quotation_totals(detail["items"])
+    return detail
+
+
+def replace_quotation_items(cur, quotation_id, items):
+    cur.execute("DELETE FROM quotation_items WHERE quotation_id = ?", (quotation_id,))
+    cleaned_items = []
+    for index, item in enumerate(items or [], start=1):
+        description = clean_value(item.get("description"))
+        if not description:
+            continue
+        quantity = parse_money(item.get("quantity") or 1) or 1
+        unit_price = parse_money(item.get("unit_price"))
+        amount = parse_money(item.get("amount")) or round(quantity * unit_price, 2)
+        cost_amount = parse_money(item.get("cost_amount"))
+        margin_amount = amount - cost_amount
+        currency = clean_value(item.get("currency")) or "USD"
+        cleaned = {
+            "line_no": index,
+            "description": description,
+            "basis": clean_value(item.get("basis")),
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "currency": currency,
+            "amount": round(amount, 2),
+            "cost_amount": cost_amount,
+            "margin_amount": round(margin_amount, 2),
+            "vendor_name": clean_value(item.get("vendor_name")),
+            "notes": clean_value(item.get("notes")),
+        }
+        cur.execute(
+            """
+            INSERT INTO quotation_items (
+                quotation_id,
+                line_no,
+                description,
+                basis,
+                quantity,
+                unit_price,
+                currency,
+                amount,
+                cost_amount,
+                margin_amount,
+                vendor_name,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                quotation_id,
+                cleaned["line_no"],
+                cleaned["description"],
+                cleaned["basis"],
+                cleaned["quantity"],
+                cleaned["unit_price"],
+                cleaned["currency"],
+                cleaned["amount"],
+                cleaned["cost_amount"],
+                cleaned["margin_amount"],
+                cleaned["vendor_name"],
+                cleaned["notes"],
+            ),
+        )
+        cleaned_items.append(cleaned)
+    return cleaned_items
+
+
+def save_quotation(record, items=None, quotation_id=None, user="admin"):
+    clean_record = {key: clean_value(value) for key, value in (record or {}).items()}
+    conn = get_connection()
+    cur = conn.cursor()
+    admin_user = cur.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
+    admin_user_id = admin_user["id"] if admin_user else None
+    opportunity = None
+    opportunity_id = clean_record.get("opportunity_id") or None
+    if opportunity_id:
+        opportunity = cur.execute(
+            """
+            SELECT
+                opportunities.*,
+                organizations.name AS organization_name,
+                contacts.name AS contact_name
+            FROM opportunities
+            LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+            LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+            WHERE opportunities.id = ?
+            """,
+            (opportunity_id,),
+        ).fetchone()
+
+    quote_items = items if items is not None else []
+    totals = calculate_quotation_totals(quote_items)
+    status = quote_status_label(clean_record.get("status"))
+    currency = clean_record.get("currency") or (
+        quote_items[0].get("currency") if quote_items else "USD"
+    )
+    customer_name = clean_record.get("customer_name") or row_value(opportunity, "organization_name")
+    contact_name = clean_record.get("contact_name") or row_value(opportunity, "contact_name")
+    trade_lane = clean_record.get("trade_lane") or row_value(opportunity, "trade_lane")
+    service_type = clean_record.get("service_type") or row_value(opportunity, "service_type")
+
+    if quotation_id:
+        existing = cur.execute("SELECT * FROM quotations WHERE id = ?", (quotation_id,)).fetchone()
+        if not existing:
+            conn.close()
+            return None
+        cur.execute(
+            """
+            UPDATE quotations
+            SET opportunity_id = ?,
+                quote_date = ?,
+                valid_until = ?,
+                currency = ?,
+                sell_amount = ?,
+                status = ?,
+                template_name = ?,
+                customer_name = ?,
+                contact_name = ?,
+                trade_lane = ?,
+                service_type = ?,
+                payment_terms = ?,
+                prepared_by = ?,
+                follow_up_date = ?,
+                notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                opportunity_id,
+                clean_record.get("quote_date") or today_iso(),
+                clean_record.get("valid_until"),
+                currency,
+                totals["sell_amount"],
+                status,
+                clean_record.get("template_name") or "Standard Freight Quote",
+                customer_name,
+                contact_name,
+                trade_lane,
+                service_type,
+                clean_record.get("payment_terms"),
+                clean_record.get("prepared_by") or user,
+                clean_record.get("follow_up_date"),
+                clean_record.get("notes"),
+                quotation_id,
+            ),
+        )
+        saved_id = quotation_id
+        action = "updated"
+    else:
+        quote_no = clean_record.get("quote_no") or generate_quote_no(cur)
+        cur.execute(
+            """
+            INSERT INTO quotations (
+                opportunity_id,
+                quote_no,
+                quote_date,
+                valid_until,
+                currency,
+                sell_amount,
+                status,
+                template_name,
+                version,
+                parent_quotation_id,
+                customer_name,
+                contact_name,
+                trade_lane,
+                service_type,
+                payment_terms,
+                prepared_by,
+                owner,
+                follow_up_date,
+                notes,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                opportunity_id,
+                quote_no,
+                clean_record.get("quote_date") or today_iso(),
+                clean_record.get("valid_until"),
+                currency,
+                totals["sell_amount"],
+                status,
+                clean_record.get("template_name") or "Standard Freight Quote",
+                int(parse_money(clean_record.get("version")) or 1),
+                clean_record.get("parent_quotation_id") or None,
+                customer_name,
+                contact_name,
+                trade_lane,
+                service_type,
+                clean_record.get("payment_terms"),
+                clean_record.get("prepared_by") or user,
+                clean_record.get("owner") or admin_user_id,
+                clean_record.get("follow_up_date"),
+                clean_record.get("notes"),
+            ),
+        )
+        saved_id = cur.lastrowid
+        action = "created"
+
+    saved_items = replace_quotation_items(cur, saved_id, quote_items)
+    totals = calculate_quotation_totals(saved_items)
+    cur.execute(
+        """
+        UPDATE quotations
+        SET sell_amount = ?,
+            currency = COALESCE(NULLIF(currency, ''), ?),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (totals["sell_amount"], currency or "USD", saved_id),
+    )
+
+    if opportunity_id and status in ["Approved", "Sent"]:
+        cur.execute(
+            """
+            UPDATE opportunities
+            SET stage = 'Quoted',
+                status = 'quoted',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (opportunity_id,),
+        )
+
+    log_crm_activity(
+        cur,
+        "Quotation Update",
+        f"Quotation {action}: {clean_record.get('quote_no') or row_value(cur.execute('SELECT quote_no FROM quotations WHERE id = ?', (saved_id,)).fetchone(), 'quote_no')}",
+        opportunity_id=opportunity_id,
+        quotation_id=saved_id,
+        organization_id=row_value(opportunity, "organization_id", None),
+        contact_id=row_value(opportunity, "contact_id", None),
+        user=user,
+    )
+    conn.commit()
+    conn.close()
+    return saved_id
+
+
+def build_quotation_items_from_pricing(opportunity_id, currency="USD"):
+    summary = get_pricing_summary(opportunity_id)
+    rates = [
+        rate for rate in summary["rates"]
+        if not currency or (rate.get("currency") or "USD") == currency
+    ]
+    items = []
+    for rate in rates:
+        items.append(
+            {
+                "description": rate.get("charge_name") or rate.get("charge_type") or "Freight charge",
+                "basis": rate.get("basis") or "Shipment",
+                "quantity": 1,
+                "unit_price": rate.get("suggested_sell_amount") or 0,
+                "currency": rate.get("currency") or currency or "USD",
+                "amount": rate.get("suggested_sell_amount") or 0,
+                "cost_amount": rate.get("cost_amount") or 0,
+                "vendor_name": rate.get("vendor_name") or rate.get("vendor_type") or "",
+                "notes": rate.get("notes") or "",
+            }
+        )
+    return items
+
+
+def create_quotation_from_opportunity(opportunity_id, template_name="Standard Freight Quote", currency="USD", user="admin"):
+    templates = {template["template_name"]: template for template in get_quotation_templates()}
+    template = templates.get(template_name) or templates.get("Standard Freight Quote") or {}
+    valid_until = days_from_today(int(template.get("validity_days") or 14))
+    items = build_quotation_items_from_pricing(opportunity_id, currency)
+    if not items:
+        opportunity = get_opportunity_detail(opportunity_id)
+        amount = opportunity.get("potential_revenue") if opportunity else 0
+        items = [
+            {
+                "description": "Freight service",
+                "basis": "Shipment",
+                "quantity": 1,
+                "unit_price": amount or 0,
+                "currency": currency or "USD",
+                "amount": amount or 0,
+                "cost_amount": 0,
+                "vendor_name": "",
+                "notes": "",
+            }
+        ]
+    record = {
+        "opportunity_id": opportunity_id,
+        "template_name": template_name,
+        "valid_until": valid_until,
+        "currency": currency or "USD",
+        "status": "Draft",
+        "payment_terms": template.get("payment_terms") or "",
+        "prepared_by": user,
+    }
+    return save_quotation(record, items, user=user)
+
+
+def create_quotation_version(quotation_id, user="admin"):
+    detail = get_quotation_detail(quotation_id)
+    if not detail:
+        return None
+    base_parent_id = detail.get("parent_quotation_id") or detail["id"]
+    conn = get_connection()
+    latest_version = conn.execute(
+        """
+        SELECT MAX(version) AS latest_version
+        FROM quotations
+        WHERE id = ? OR parent_quotation_id = ?
+        """,
+        (base_parent_id, base_parent_id),
+    ).fetchone()
+    conn.close()
+    next_version = int(row_value(latest_version, "latest_version", 1) or 1) + 1
+    record = {
+        "opportunity_id": detail.get("opportunity_id"),
+        "quote_no": detail.get("quote_no"),
+        "quote_date": today_iso(),
+        "valid_until": detail.get("valid_until"),
+        "currency": detail.get("currency"),
+        "status": "Draft",
+        "template_name": detail.get("template_name"),
+        "version": next_version,
+        "parent_quotation_id": base_parent_id,
+        "customer_name": detail.get("customer_name"),
+        "contact_name": detail.get("contact_name"),
+        "trade_lane": detail.get("trade_lane"),
+        "service_type": detail.get("service_type"),
+        "payment_terms": detail.get("payment_terms"),
+        "prepared_by": user,
+        "follow_up_date": detail.get("follow_up_date"),
+        "notes": detail.get("notes"),
+    }
+    return save_quotation(record, detail.get("items", []), user=user)
+
+
+def update_quotation_status(quotation_id, status, user="admin"):
+    normalized_status = quote_status_label(status)
+    conn = get_connection()
+    cur = conn.cursor()
+    quotation = cur.execute(
+        """
+        SELECT quotations.*, opportunities.organization_id, opportunities.contact_id
+        FROM quotations
+        LEFT JOIN opportunities ON opportunities.id = quotations.opportunity_id
+        WHERE quotations.id = ?
+        """,
+        (quotation_id,),
+    ).fetchone()
+    if not quotation:
+        conn.close()
+        return False
+    approved_at = row_value(quotation, "approved_at") or None
+    approved_by = row_value(quotation, "approved_by") or None
+    sent_at = row_value(quotation, "sent_at") or None
+    if normalized_status == "Approved":
+        approved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        approved_by = user
+    if normalized_status == "Sent":
+        sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not approved_at:
+            approved_at = sent_at
+            approved_by = user
+    cur.execute(
+        """
+        UPDATE quotations
+        SET status = ?,
+            approved_at = ?,
+            approved_by = ?,
+            sent_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (normalized_status, approved_at, approved_by, sent_at, quotation_id),
+    )
+    if normalized_status in ["Approved", "Sent"] and quotation["opportunity_id"]:
+        cur.execute(
+            """
+            UPDATE opportunities
+            SET stage = 'Quoted',
+                status = 'quoted',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (quotation["opportunity_id"],),
+        )
+    log_crm_activity(
+        cur,
+        "Quotation Approval",
+        f"Quotation {quotation['quote_no']} status changed to {normalized_status}",
+        opportunity_id=quotation["opportunity_id"],
+        quotation_id=quotation_id,
+        organization_id=quotation["organization_id"],
+        contact_id=quotation["contact_id"],
+        user=user,
+    )
     conn.commit()
     conn.close()
     return True

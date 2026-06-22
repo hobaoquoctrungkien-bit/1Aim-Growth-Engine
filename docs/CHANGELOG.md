@@ -16,6 +16,13 @@
 ## 2026-06-22
 
 - Added `PRODUCT_CONSTITUTION.md` as the highest-priority product source of truth.
+- Added Quotation Engine for creating draft quotes from opportunities, editing customer-facing line items, template defaults, Excel export, PDF export, versioning, approval, and sent status tracking.
+- Added `quotation_items` and `quotation_templates` tables, plus quotation version, approval, customer snapshot, and template metadata fields.
+- Added quotation smoke test coverage for creation from pricing, Excel/PDF export, version creation, approval, and linked opportunity stage update.
+- Added Pricing Engine for carrier rates, agent rates, local charges, margin calculation, rate comparison, and suggested sell rate application to opportunities.
+- Added `vendor_rates` table linked to opportunities with optional quotation linkage for future quote finalization.
+- Added local-charge rollup into carrier/agent pricing comparisons so suggested sell rates include common quote charges.
+- Added smoke test coverage for pricing margin math, rate saving, comparison, and opportunity revenue/profit application.
 - Added `PRODUCT_CONSISTENCY_REPORT.md` comparing the constitution against architecture, CRM rules, `.codex-rules.md`, and current implementation.
 - Updated architecture documentation to reference the Product Constitution and consistency report.
 - Grouped Outreach Campaigns, Quick Capture, Leads Import, and Leads List under the parent Leads menu.
@@ -81,6 +88,7 @@
 - Updated Git Health to ignore runtime SQLite database files under `data/*.db`, because DB safety is handled by database backups.
 - Added Opportunity Pipeline V1 with Opportunities menu, list, detail, create from Lead Detail, stage buttons, opportunity dashboard KPIs, and revenue KPIs.
 - Added Inquiry Intake workspace for pasted inquiry emails, attachment parsing, reviewed opportunity creation, automatic inquiry folders, saved files, prepare-quote tasks, and inquiry activity logging.
+- Moved Inquiry Intake into the Opportunities page and replaced the generic Create Opportunity form there.
 - Added smoke test coverage for inquiry extraction, file saving, opportunity creation, and prepare-quote task creation.
 - Refined global UI styling for dark-mode controls, focus states, tabs, expanders, disabled buttons, and reusable status badges while preserving large-font accessibility.
 - Reorganized Admin settings by moving UI Scale into System Settings, grouping email maintenance under Email Settings, and moving Daily Outreach Capacity into CRM Activation.

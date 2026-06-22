@@ -61,6 +61,40 @@ Rules:
 - TXT, EML, CSV, PDF, DOCX, XLS, and XLSX attachments should be parsed when possible.
 - Attachments are saved for quotation preparation evidence, but unsupported attachment types may be saved without text extraction.
 
+## Pricing Engine
+
+Pricing Engine supports quotation preparation after an opportunity reaches quote work.
+
+Rules:
+
+- Pricing lines belong to an existing opportunity.
+- Carrier rates, agent rates, and local charges are saved as `vendor_rates`.
+- Each pricing line stores cost, currency, margin percentage, optional fixed margin, and suggested sell amount.
+- Suggested sell amount equals cost plus percentage margin plus fixed margin.
+- Local charges are not compared as standalone carrier options when carrier or agent rates exist.
+- Local charges are rolled into each carrier or agent option for rate comparison.
+- Applying the suggested sell rate updates opportunity `potential_revenue` and `potential_profit` only.
+- Pricing Engine does not create shipments, billing records, accounting records, or operation execution objects.
+
+## Quotation Engine
+
+Quotation Engine creates customer-facing quotes from opportunities after pricing work.
+
+Rules:
+
+- A quotation must belong to an existing opportunity when created from the app workflow.
+- Quote line items are saved as quotation-owned items, not as shipment, billing, or accounting records.
+- Saved pricing lines may be copied into quotation line items, but the quotation remains editable before approval.
+- Quote statuses are Draft, Pending Approval, Approved, Sent, and Rejected.
+- A quote should be reviewed before approval.
+- Marking a quote Approved records who approved it and when.
+- Marking a quote Sent records the sent timestamp.
+- Approved or sent quotations update the linked opportunity to `Quoted`.
+- Quote revisions should use version control instead of overwriting customer history.
+- New quote versions keep the same quote number, increment the version number, and copy the prior quote line items.
+- Excel and PDF exports must use saved quotation data so exported documents match the approval record.
+- Quotation Engine does not create shipments, invoices, payment records, or accounting records.
+
 ## Strategic Direction
 
 1Aim's primary growth strategy is to build strong freight-forwarder relationships, with special focus on China network development.

@@ -3,6 +3,71 @@
 Date: 2026-06-22
 
 Decision:
+Quotation Engine uses the existing `quotations` table as the quote header, with `quotation_items` for customer-facing line items and `quotation_templates` for reusable quote text.
+
+Reason:
+Quotations belong after opportunities and pricing. Extending the existing quotation concept preserves quote history, avoids another revenue object, and keeps exported customer documents tied to the opportunity pipeline.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Quotation versioning keeps the same quote number and increments a version number.
+
+Reason:
+Customers often request revisions to the same quotation. Keeping one quote number with version history makes follow-up and audit easier than creating unrelated quote numbers for every revision.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Approved or sent quotations update the linked opportunity stage to `Quoted`.
+
+Reason:
+Quotation approval/sending is the business event that moves an opportunity from quote preparation into quoted pipeline status. This is a narrow CRM linkage and does not change unrelated relationship state.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Pricing Engine uses `vendor_rates` as the quote-preparation rate table linked to existing opportunities.
+
+Reason:
+Carrier, agent, and local charge pricing belongs between Opportunity and Quotation. Linking rate lines to opportunities avoids creating a duplicate revenue object while preserving a path to connect selected rates to quotations later.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Local charges are rolled into carrier and agent options during pricing comparison.
+
+Reason:
+Local charges are part of the real sell-rate total and should not appear as standalone winning options when comparing carrier or agent choices.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
 `PRODUCT_CONSTITUTION.md` is the highest-priority product document for future 1Aim Growth Engine development.
 
 Reason:

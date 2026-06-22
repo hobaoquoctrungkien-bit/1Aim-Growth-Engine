@@ -16,6 +16,8 @@ database_module = importlib.reload(database_module)
 
 from ui_helpers import status_badge_html
 from database import (
+    apply_pricing_summary_to_opportunity,
+    calculate_suggested_sell_rate,
     create_inquiry,
     create_inquiry_opportunity,
     find_captured_crm_duplicates,
@@ -37,6 +39,10 @@ from database import (
     get_open_tasks,
     get_outreach_campaign_metrics,
     get_outreach_campaign_templates,
+    get_pricing_summary,
+    get_quotation_detail,
+    get_quotation_templates,
+    get_quotations,
     process_email_bounces,
     get_campaign_audience,
     get_campaign_filter_options,
@@ -51,9 +57,14 @@ from database import (
     initialize_missing_lead_followups,
     init_db,
     mark_prepare_quote_sent,
+    create_quotation_from_opportunity,
+    create_quotation_version,
     save_captured_crm_record,
     save_holiday_library_item,
     save_opportunity,
+    save_quotation,
+    save_quotation_template,
+    save_vendor_rate,
     create_and_send_outreach_campaign,
     has_captured_crm_duplicates,
     is_smtp_configured,
@@ -80,6 +91,7 @@ from database import (
     update_lead_status_action,
     update_organization_customer_action,
     update_opportunity_stage,
+    update_quotation_status,
     OPPORTUNITY_STAGES,
 )
 from inquiry_intake import (
@@ -101,6 +113,7 @@ from knowledge_service import (
     search_documents,
     search_sops,
 )
+from quotation_engine import build_quotation_excel, build_quotation_pdf
 
 
 EXCEL_COLUMNS = {
@@ -156,6 +169,10 @@ OCCASION_TYPE_OPTIONS = [
     "First Meeting Anniversary",
     "Custom",
 ]
+PRICING_VENDOR_TYPE_OPTIONS = ["Carrier", "Agent", "Local Charge"]
+PRICING_CHARGE_TYPE_OPTIONS = ["Freight", "Origin", "Destination", "Customs", "Documentation", "Trucking", "Other"]
+PRICING_CURRENCY_OPTIONS = ["USD", "VND", "CNY", "EUR"]
+QUOTATION_STATUS_OPTIONS = ["Draft", "Pending Approval", "Approved", "Sent", "Rejected"]
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -2504,7 +2521,7 @@ def money_display(value):
 
 
 def show_inquiry_intake():
-    st.title("Inquiry Intake")
+    st.subheader("Inquiry Intake")
     st.caption("Parse inbound freight inquiries, save attachments, and create a reviewed opportunity.")
 
     raw_email = st.text_area(
@@ -2606,7 +2623,6 @@ def show_inquiry_intake():
         st.session_state.pop("inquiry_parsed", None)
         st.session_state.pop("inquiry_attachment_items", None)
         st.success("Opportunity created and inquiry files saved.")
-        st.session_state.pending_page = "Opportunities"
         st.rerun()
 
 
@@ -2628,55 +2644,7 @@ def show_opportunities():
     revenue_cols[1].metric("Negotiation Value", money_display(dashboard["negotiation_value"]))
     revenue_cols[2].metric("Won Value", money_display(dashboard["won_value"]))
 
-    st.subheader("Create Opportunity")
-    leads = get_leads()
-    lead_options = {"No linked lead": None}
-    for lead in leads:
-        label = (
-            f"#{lead['id']} - "
-            f"{lead['company_name'] or 'No organization'} - "
-            f"{lead['contact_person'] or 'No contact'}"
-        )
-        lead_options[label] = lead
-
-    with st.expander("New Opportunity", expanded=False):
-        selected_label = st.selectbox("Link to Lead", list(lead_options.keys()), key="new_opp_lead")
-        selected_lead = lead_options[selected_label]
-        default_name = ""
-        if selected_lead:
-            default_name = f"{selected_lead['company_name'] or 'Opportunity'} - {selected_lead['contact_person'] or 'Freight opportunity'}"
-        opportunity_name = st.text_input("Opportunity Name", value=default_name, key="new_opp_name")
-        create_cols = st.columns(3)
-        stage = create_cols[0].selectbox("Stage", OPPORTUNITY_STAGES, key="new_opp_stage")
-        trade_lane = create_cols[1].text_input("Trade Lane", key="new_opp_lane")
-        service_type = create_cols[2].text_input("Service Type", key="new_opp_service")
-        value_cols = st.columns(4)
-        potential_revenue = value_cols[0].text_input("Potential Revenue", key="new_opp_revenue")
-        potential_profit = value_cols[1].text_input("Potential Profit", key="new_opp_profit")
-        expected_close_date = value_cols[2].text_input("Expected Close Date", placeholder="YYYY-MM-DD", key="new_opp_close")
-        next_action_date = value_cols[3].text_input("Next Action Date", placeholder="YYYY-MM-DD", key="new_opp_next_date")
-        next_action = st.text_input("Next Action", key="new_opp_next_action")
-        notes = st.text_area("Notes", key="new_opp_notes")
-        if st.button("Create Opportunity", type="primary", key="create_opportunity"):
-            opportunity_id = save_opportunity(
-                {
-                    "opportunity_name": opportunity_name,
-                    "organization_id": selected_lead["organization_id"] if selected_lead else None,
-                    "contact_id": selected_lead["contact_id"] if selected_lead else None,
-                    "owner": None,
-                    "stage": stage,
-                    "trade_lane": trade_lane,
-                    "service_type": service_type,
-                    "potential_revenue": potential_revenue,
-                    "potential_profit": potential_profit,
-                    "expected_close_date": expected_close_date,
-                    "next_action": next_action,
-                    "next_action_date": next_action_date,
-                    "notes": notes,
-                }
-            )
-            st.session_state.selected_opportunity_id = opportunity_id
-            st.rerun()
+    show_inquiry_intake()
 
     opportunities = get_opportunities()
     st.subheader("Opportunity List")
@@ -2784,6 +2752,435 @@ def show_opportunity_detail(opportunity_id):
     if not opportunity.get("activities"):
         st.info("No opportunity activity yet.")
     for activity in opportunity.get("activities", []):
+        st.markdown(f"**{activity.get('activity_at') or activity.get('created_at')}** - {activity.get('activity_type')}")
+        st.write(activity.get("description") or activity.get("summary") or "")
+
+
+def currency_display(value, currency="USD"):
+    try:
+        return f"{currency} {float(value or 0):,.2f}"
+    except (TypeError, ValueError):
+        return f"{currency} 0.00"
+
+
+def show_pricing_engine():
+    st.title("Pricing Engine")
+    st.caption("Capture carrier rates, agent rates, local charges, and compare suggested sell rates by opportunity.")
+
+    opportunities = get_opportunities()
+    if not opportunities:
+        st.info("Create an opportunity first, then add pricing lines here.")
+        return
+
+    opportunity_options = {}
+    for opportunity in opportunities:
+        label = (
+            f"#{opportunity['id']} - "
+            f"{opportunity.get('display_name') or 'Untitled'}"
+            f" | {opportunity.get('stage') or '-'}"
+        )
+        opportunity_options[label] = opportunity
+
+    selected_label = st.selectbox(
+        "Opportunity",
+        list(opportunity_options.keys()),
+        key="pricing_selected_opportunity",
+    )
+    selected_opportunity = opportunity_options[selected_label]
+    opportunity_id = selected_opportunity["id"]
+
+    st.subheader(selected_opportunity.get("display_name") or "Opportunity")
+    meta_cols = st.columns(4)
+    meta_cols[0].metric("Stage", selected_opportunity.get("stage") or "-")
+    meta_cols[1].metric("Trade Lane", selected_opportunity.get("trade_lane") or "-")
+    meta_cols[2].metric("Current Revenue", money_display(selected_opportunity.get("potential_revenue")))
+    meta_cols[3].metric("Current Profit", money_display(selected_opportunity.get("potential_profit")))
+
+    with st.expander("Add Pricing Line", expanded=True):
+        line_cols = st.columns(3)
+        vendor_type = line_cols[0].selectbox("Rate Type", PRICING_VENDOR_TYPE_OPTIONS, key="pricing_vendor_type")
+        vendor_name = line_cols[1].text_input("Vendor / Agent", key="pricing_vendor_name")
+        charge_type = line_cols[2].selectbox("Charge Type", PRICING_CHARGE_TYPE_OPTIONS, key="pricing_charge_type")
+
+        charge_cols = st.columns(4)
+        charge_name = charge_cols[0].text_input("Charge Name", value="Freight", key="pricing_charge_name")
+        basis = charge_cols[1].text_input("Basis", value="Shipment", key="pricing_basis")
+        currency = charge_cols[2].selectbox("Currency", PRICING_CURRENCY_OPTIONS, key="pricing_currency")
+        cost_amount = charge_cols[3].number_input("Cost Amount", min_value=0.0, value=0.0, step=10.0, key="pricing_cost")
+
+        margin_cols = st.columns(4)
+        margin_percent = margin_cols[0].number_input("Margin %", min_value=0.0, value=15.0, step=1.0, key="pricing_margin_percent")
+        margin_amount = margin_cols[1].number_input("Fixed Margin", min_value=0.0, value=0.0, step=10.0, key="pricing_margin_amount")
+        transit_time = margin_cols[2].text_input("Transit Time", key="pricing_transit_time")
+        valid_until = margin_cols[3].text_input("Valid Until", placeholder="YYYY-MM-DD", key="pricing_valid_until")
+        notes = st.text_area("Notes", height=90, key="pricing_notes")
+
+        calculated = calculate_suggested_sell_rate(cost_amount, margin_percent, margin_amount)
+        preview_cols = st.columns(3)
+        preview_cols[0].metric("Cost", currency_display(calculated["cost_amount"], currency))
+        preview_cols[1].metric("Margin", currency_display(calculated["margin_amount"], currency))
+        preview_cols[2].metric("Suggested Sell", currency_display(calculated["suggested_sell_amount"], currency))
+
+        errors = []
+        if not charge_name.strip():
+            errors.append("Charge name is required.")
+        if not vendor_name.strip() and vendor_type != "Local Charge":
+            errors.append("Vendor / agent name is required for carrier and agent rates.")
+        for error in errors:
+            st.warning(error)
+
+        if st.button("Save Pricing Line", type="primary", disabled=bool(errors), key="save_pricing_line"):
+            save_vendor_rate(
+                {
+                    "opportunity_id": opportunity_id,
+                    "vendor_type": vendor_type,
+                    "vendor_name": vendor_name,
+                    "charge_type": charge_type,
+                    "charge_name": charge_name,
+                    "basis": basis,
+                    "currency": currency,
+                    "cost_amount": cost_amount,
+                    "margin_percent": margin_percent,
+                    "margin_amount": margin_amount,
+                    "transit_time": transit_time,
+                    "valid_until": valid_until,
+                    "notes": notes,
+                }
+            )
+            st.success("Pricing line saved.")
+            st.rerun()
+
+    summary = get_pricing_summary(opportunity_id)
+
+    st.subheader("Rate Comparison")
+    if not summary["comparisons"]:
+        st.info("No pricing lines saved for this opportunity yet.")
+    else:
+        comparison_df = pd.DataFrame(summary["comparisons"])
+        st.dataframe(
+            comparison_df[
+                [
+                    "currency",
+                    "vendor_type",
+                    "vendor_name",
+                    "line_count",
+                    "cost_total",
+                    "margin_total",
+                    "margin_percent",
+                    "suggested_sell_total",
+                    "transit_time",
+                    "valid_until",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        currencies = list(summary["best_by_currency"].keys())
+        selected_currency = st.selectbox("Suggested Currency", currencies, key="pricing_apply_currency")
+        best = summary["best_by_currency"][selected_currency]
+        best_cols = st.columns(4)
+        best_cols[0].metric("Best Option", best["vendor_name"])
+        best_cols[1].metric("Suggested Sell", currency_display(best["suggested_sell_total"], selected_currency))
+        best_cols[2].metric("Expected Profit", currency_display(best["margin_total"], selected_currency))
+        best_cols[3].metric("Margin", f"{best['margin_percent']}%")
+        if st.button("Apply Suggested Rate To Opportunity", key="apply_pricing_to_opportunity"):
+            apply_pricing_summary_to_opportunity(opportunity_id, selected_currency)
+            st.success("Opportunity revenue and profit updated from the suggested sell rate.")
+            st.rerun()
+
+    st.subheader("Saved Rate Lines")
+    if summary["rates"]:
+        rate_df = pd.DataFrame(summary["rates"])
+        st.dataframe(
+            rate_df[
+                [
+                    "vendor_type",
+                    "vendor_name",
+                    "charge_type",
+                    "charge_name",
+                    "basis",
+                    "currency",
+                    "cost_amount",
+                    "margin_percent",
+                    "margin_amount",
+                    "suggested_sell_amount",
+                    "transit_time",
+                    "valid_until",
+                    "notes",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def quotation_file_name(quotation, extension):
+    quote_no = quotation.get("quote_no") or "quotation"
+    version = quotation.get("version") or 1
+    return f"{quote_no}_v{version}.{extension}"
+
+
+def show_quotation_engine():
+    if st.session_state.get("selected_quotation_id"):
+        show_quotation_detail(st.session_state.selected_quotation_id)
+        return
+
+    st.title("Quotation Engine")
+    st.caption("Create customer quotations from opportunities, manage versions, approve quotes, and export Excel or PDF.")
+
+    quotations = get_quotations()
+    dashboard_cols = st.columns(5)
+    dashboard_cols[0].metric("Total Quotes", len(quotations))
+    for index, status in enumerate(["Draft", "Pending Approval", "Approved", "Sent"], start=1):
+        dashboard_cols[index].metric(status, sum(1 for quote in quotations if quote.get("status") == status))
+
+    st.subheader("Create Quotation")
+    opportunities = get_opportunities()
+    templates = get_quotation_templates()
+    template_names = [template["template_name"] for template in templates] or ["Standard Freight Quote"]
+
+    if opportunities:
+        with st.expander("New Quote From Opportunity", expanded=True):
+            opportunity_options = {}
+            for opportunity in opportunities:
+                label = (
+                    f"#{opportunity['id']} - "
+                    f"{opportunity.get('display_name') or 'Untitled'}"
+                    f" | {opportunity.get('stage') or '-'}"
+                    f" | {money_display(opportunity.get('potential_revenue'))}"
+                )
+                opportunity_options[label] = opportunity
+            selected_label = st.selectbox("Opportunity", list(opportunity_options.keys()), key="quote_new_opportunity")
+            selected_opportunity = opportunity_options[selected_label]
+            create_cols = st.columns(3)
+            template_name = create_cols[0].selectbox("Template", template_names, key="quote_new_template")
+            currency = create_cols[1].selectbox("Currency", PRICING_CURRENCY_OPTIONS, key="quote_new_currency")
+            create_cols[2].metric("Stage", selected_opportunity.get("stage") or "-")
+            if st.button("Create Draft Quote", type="primary", key="create_draft_quote"):
+                quotation_id = create_quotation_from_opportunity(
+                    selected_opportunity["id"],
+                    template_name=template_name,
+                    currency=currency,
+                )
+                st.session_state.selected_quotation_id = quotation_id
+                st.rerun()
+    else:
+        st.info("Create an opportunity before creating a quotation.")
+
+    with st.expander("Quotation Templates", expanded=False):
+        template_cols = st.columns(4)
+        template_name = template_cols[0].text_input("Template Name", value="Standard Freight Quote", key="quote_template_name")
+        validity_days = template_cols[1].number_input("Validity Days", min_value=1, value=14, step=1, key="quote_template_validity")
+        payment_terms = template_cols[2].text_input("Payment Terms", value="Payment before cargo release unless otherwise agreed.", key="quote_template_terms")
+        template_cols[3].write("")
+        header_text = st.text_area("Header Text", value="Thank you for your inquiry. Please find our quotation below.", height=80, key="quote_template_header")
+        footer_text = st.text_area("Footer Text", value="Rates are subject to space, equipment, and final cargo details at booking.", height=80, key="quote_template_footer")
+        if st.button("Save Template", key="save_quote_template"):
+            save_quotation_template(template_name, header_text, footer_text, payment_terms, validity_days)
+            st.success("Quotation template saved.")
+            st.rerun()
+
+    st.subheader("Quotation List")
+    if not quotations:
+        st.info("No quotations yet.")
+        return
+
+    header = st.columns([1, 1, 1, 2, 2, 1, 1, 1])
+    header[0].caption("Quote")
+    header[1].caption("Version")
+    header[2].caption("Status")
+    header[3].caption("Customer")
+    header[4].caption("Opportunity")
+    header[5].caption("Amount")
+    header[6].caption("Valid Until")
+    header[7].caption("Open")
+    for quotation in quotations:
+        cols = st.columns([1, 1, 1, 2, 2, 1, 1, 1])
+        cols[0].write(quotation.get("quote_no") or "-")
+        cols[1].write(f"v{quotation.get('version') or 1}")
+        cols[2].write(quotation.get("status") or "-")
+        cols[3].write(quotation.get("customer_name") or "-")
+        cols[4].write(quotation.get("opportunity_name") or "-")
+        cols[5].write(currency_display(quotation.get("sell_amount"), quotation.get("currency") or "USD"))
+        cols[6].write(quotation.get("valid_until") or "-")
+        if cols[7].button("Open", key=f"open_quote_{quotation['id']}"):
+            st.session_state.selected_quotation_id = quotation["id"]
+            st.rerun()
+
+
+def show_quotation_detail(quotation_id):
+    quotation = get_quotation_detail(quotation_id)
+    if not quotation:
+        st.warning("Quotation not found.")
+        if st.button("Back to Quotation Engine"):
+            st.session_state.selected_quotation_id = None
+            st.rerun()
+        return
+
+    if st.button("Back to Quotation Engine"):
+        st.session_state.selected_quotation_id = None
+        st.rerun()
+
+    st.title(f"{quotation.get('quote_no') or 'Quotation'} v{quotation.get('version') or 1}")
+    st.caption(" | ".join(item for item in [
+        quotation.get("customer_name"),
+        quotation.get("trade_lane"),
+        quotation.get("service_type"),
+    ] if item))
+
+    kpi_cols = st.columns(4)
+    kpi_cols[0].metric("Status", quotation.get("status") or "-")
+    kpi_cols[1].metric("Total", currency_display(quotation.get("sell_amount"), quotation.get("currency") or "USD"))
+    kpi_cols[2].metric("Valid Until", quotation.get("valid_until") or "-")
+    kpi_cols[3].metric("Template", quotation.get("template_name") or "-")
+
+    st.subheader("Quote Details")
+    detail_cols = st.columns(4)
+    quote_date = detail_cols[0].text_input("Quote Date", value=quotation.get("quote_date") or "", key=f"quote_date_{quotation_id}")
+    valid_until = detail_cols[1].text_input("Valid Until", value=quotation.get("valid_until") or "", key=f"quote_valid_{quotation_id}")
+    currency = detail_cols[2].selectbox(
+        "Currency",
+        PRICING_CURRENCY_OPTIONS,
+        index=PRICING_CURRENCY_OPTIONS.index(quotation.get("currency")) if quotation.get("currency") in PRICING_CURRENCY_OPTIONS else 0,
+        key=f"quote_currency_{quotation_id}",
+    )
+    status = detail_cols[3].selectbox(
+        "Status",
+        QUOTATION_STATUS_OPTIONS,
+        index=QUOTATION_STATUS_OPTIONS.index(quotation.get("status")) if quotation.get("status") in QUOTATION_STATUS_OPTIONS else 0,
+        key=f"quote_status_{quotation_id}",
+    )
+
+    meta_cols = st.columns(4)
+    customer_name = meta_cols[0].text_input("Customer", value=quotation.get("customer_name") or "", key=f"quote_customer_{quotation_id}")
+    contact_name = meta_cols[1].text_input("Contact", value=quotation.get("contact_name") or "", key=f"quote_contact_{quotation_id}")
+    trade_lane = meta_cols[2].text_input("Trade Lane", value=quotation.get("trade_lane") or "", key=f"quote_lane_{quotation_id}")
+    service_type = meta_cols[3].text_input("Service", value=quotation.get("service_type") or "", key=f"quote_service_{quotation_id}")
+    payment_terms = st.text_input("Payment Terms", value=quotation.get("payment_terms") or "", key=f"quote_terms_{quotation_id}")
+    notes = st.text_area("Notes", value=quotation.get("notes") or "", height=100, key=f"quote_notes_{quotation_id}")
+
+    st.subheader("Line Items")
+    item_rows = []
+    for item in quotation.get("items", []):
+        item_rows.append(
+            {
+                "description": item.get("description") or "",
+                "basis": item.get("basis") or "",
+                "quantity": float(item.get("quantity") or 1),
+                "unit_price": float(item.get("unit_price") or 0),
+                "currency": item.get("currency") or currency,
+                "amount": float(item.get("amount") or 0),
+                "cost_amount": float(item.get("cost_amount") or 0),
+                "vendor_name": item.get("vendor_name") or "",
+                "notes": item.get("notes") or "",
+            }
+        )
+    if not item_rows:
+        item_rows = [
+            {
+                "description": "Freight service",
+                "basis": "Shipment",
+                "quantity": 1.0,
+                "unit_price": 0.0,
+                "currency": currency,
+                "amount": 0.0,
+                "cost_amount": 0.0,
+                "vendor_name": "",
+                "notes": "",
+            }
+        ]
+
+    edited_items = st.data_editor(
+        pd.DataFrame(item_rows),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key=f"quote_items_{quotation_id}",
+        column_config={
+            "description": st.column_config.TextColumn("Description", required=True),
+            "basis": st.column_config.TextColumn("Basis"),
+            "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0),
+            "unit_price": st.column_config.NumberColumn("Unit Price", min_value=0.0, step=10.0),
+            "currency": st.column_config.SelectboxColumn("Currency", options=PRICING_CURRENCY_OPTIONS),
+            "amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=10.0),
+            "cost_amount": st.column_config.NumberColumn("Cost", min_value=0.0, step=10.0),
+            "vendor_name": st.column_config.TextColumn("Vendor"),
+            "notes": st.column_config.TextColumn("Notes"),
+        },
+    )
+    item_records = edited_items.fillna("").to_dict("records")
+    preview_total = sum(float(item.get("amount") or 0) or (float(item.get("quantity") or 0) * float(item.get("unit_price") or 0)) for item in item_records)
+    st.metric("Preview Total", currency_display(preview_total, currency))
+
+    save_cols = st.columns(6)
+    if save_cols[0].button("Save Quote", type="primary", key=f"save_quote_{quotation_id}"):
+        save_quotation(
+            {
+                "opportunity_id": quotation.get("opportunity_id"),
+                "quote_date": quote_date,
+                "valid_until": valid_until,
+                "currency": currency,
+                "status": status,
+                "template_name": quotation.get("template_name"),
+                "customer_name": customer_name,
+                "contact_name": contact_name,
+                "trade_lane": trade_lane,
+                "service_type": service_type,
+                "payment_terms": payment_terms,
+                "prepared_by": quotation.get("prepared_by"),
+                "follow_up_date": quotation.get("follow_up_date"),
+                "notes": notes,
+            },
+            item_records,
+            quotation_id=quotation_id,
+        )
+        st.success("Quotation saved.")
+        st.rerun()
+
+    if save_cols[1].button("New Version", key=f"version_quote_{quotation_id}"):
+        new_id = create_quotation_version(quotation_id)
+        st.session_state.selected_quotation_id = new_id
+        st.success("New quote version created.")
+        st.rerun()
+
+    if save_cols[2].button("Submit Approval", key=f"submit_quote_{quotation_id}"):
+        update_quotation_status(quotation_id, "Pending Approval")
+        st.rerun()
+
+    if save_cols[3].button("Approve", key=f"approve_quote_{quotation_id}"):
+        update_quotation_status(quotation_id, "Approved")
+        st.rerun()
+
+    if save_cols[4].button("Reject", key=f"reject_quote_{quotation_id}"):
+        update_quotation_status(quotation_id, "Rejected")
+        st.rerun()
+
+    if save_cols[5].button("Mark Sent", key=f"sent_quote_{quotation_id}"):
+        update_quotation_status(quotation_id, "Sent")
+        st.rerun()
+
+    latest_quotation = get_quotation_detail(quotation_id) or quotation
+    export_cols = st.columns(2)
+    export_cols[0].download_button(
+        "Download Excel",
+        data=build_quotation_excel(latest_quotation),
+        file_name=quotation_file_name(latest_quotation, "xlsx"),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_quote_excel_{quotation_id}",
+    )
+    export_cols[1].download_button(
+        "Download PDF",
+        data=build_quotation_pdf(latest_quotation),
+        file_name=quotation_file_name(latest_quotation, "pdf"),
+        mime="application/pdf",
+        key=f"download_quote_pdf_{quotation_id}",
+    )
+
+    st.subheader("Activity")
+    if not quotation.get("activities"):
+        st.info("No quotation activity yet.")
+    for activity in quotation.get("activities", []):
         st.markdown(f"**{activity.get('activity_at') or activity.get('created_at')}** - {activity.get('activity_type')}")
         st.write(activity.get("description") or activity.get("summary") or "")
 
@@ -4208,6 +4605,8 @@ def show_knowledge_base():
 
 pending_page = st.session_state.pop("pending_page", None)
 if pending_page:
+    if pending_page == "Inquiry Intake":
+        pending_page = "Opportunities"
     if pending_page in ["Outreach Campaigns", "Quick Capture", "Leads Import", "Leads List"]:
         st.session_state.page = "Leads"
         st.session_state.leads_page = pending_page
@@ -4229,7 +4628,7 @@ with st.sidebar:
 
     page = st.radio(
         "Menu",
-        ["Dashboard", "Relationships", "Inquiry Intake", "Opportunities", "Leads", "Knowledge Base", "Admin"],
+        ["Dashboard", "Relationships", "Opportunities", "Pricing Engine", "Quotation Engine", "Leads", "Knowledge Base", "Admin"],
         key="page",
     )
     previous_parent_page = st.session_state.get("previous_parent_page")
@@ -4269,10 +4668,12 @@ elif page == "Relationships":
         show_occasion_reminders()
     else:
         show_follow_up_queue()
-elif page == "Inquiry Intake":
-    show_inquiry_intake()
 elif page == "Opportunities":
     show_opportunities()
+elif page == "Pricing Engine":
+    show_pricing_engine()
+elif page == "Quotation Engine":
+    show_quotation_engine()
 elif page == "Leads":
     leads_page = st.session_state.get("leads_page", "Leads List")
     if leads_page == "Outreach Campaigns":

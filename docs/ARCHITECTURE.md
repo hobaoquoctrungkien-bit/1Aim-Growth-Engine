@@ -38,6 +38,7 @@ Core CRM tables:
 - `knowledge_document_tags`
 - `knowledge_sops`
 - `backup_history`
+- `vendor_rates`
 
 Customer is represented by `organizations.customer_status`. There is no separate customers table.
 
@@ -375,17 +376,68 @@ Reason:
 The Opportunities page contains:
 
 - Opportunity dashboard KPIs
+- Inquiry Intake workflow for creating reviewed inbound opportunities
 - Revenue KPIs
 - Opportunity list
 - Opportunity detail
 - Stage change actions
-- Create opportunity workflow
+- Manual opportunity creation from Lead Detail
 
 Lead Detail can create an opportunity directly from the current lead context.
 
+## Pricing Engine
+
+Pricing Engine is the quote-preparation layer between Opportunity and Quotation.
+
+Tables:
+
+- `vendor_rates`: carrier, overseas agent, and local charge rate lines linked to `opportunities`, with optional future linkage to `quotations`.
+
+The Pricing Engine supports:
+
+- Carrier rate capture
+- Agent rate capture
+- Local charge capture
+- Margin percentage and fixed-margin calculation
+- Rate comparison by currency
+- Suggested sell rate calculation
+
+Local charges are rolled into each carrier or agent option during comparison so the suggested sell rate reflects a practical customer quotation total. Applying a suggested sell rate updates only the linked opportunity's `potential_revenue` and `potential_profit`.
+
+## Quotation Engine
+
+Quotation Engine is the customer-facing quote layer after Pricing Engine.
+
+Tables:
+
+- `quotations`: quote header, opportunity linkage, quote number, version, status, template name, customer/contact snapshot, lane/service snapshot, payment terms, approval timestamps, sent timestamp, and total sell amount.
+- `quotation_items`: quote line items linked to one quotation.
+- `quotation_templates`: reusable quote text, payment terms, and validity defaults.
+
+Workflow:
+
+- Create a draft quotation from an existing opportunity.
+- Pull saved pricing lines into quote line items when available.
+- Edit quote header fields and line items before sending.
+- Submit quotation for approval, approve, reject, mark sent, or create a new version.
+- Approved or sent quotations update the linked opportunity to `Quoted`.
+- Export customer-readable Excel and PDF files from the saved quotation detail.
+
+Version control:
+
+- A new version copies the previous quotation header and line items.
+- Versions share the same quote number and increment `quotations.version`.
+- `quotations.parent_quotation_id` links later versions back to the first version.
+
+Approval:
+
+- Quote statuses are Draft, Pending Approval, Approved, Sent, and Rejected.
+- Approval stores `approved_at` and `approved_by`.
+- Marking a quote Sent stores `sent_at`; if it was not already approved, approval is recorded at the same time.
+
 ## Inquiry Intake
 
-Inquiry Intake turns inbound freight emails into reviewed opportunities.
+Inquiry Intake lives inside the Opportunities page and turns inbound freight emails into reviewed opportunities.
 
 The page supports:
 
