@@ -6,12 +6,14 @@ import re
 import socket
 import ssl
 import time
+import uuid
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from email.message import EmailMessage
 from email.header import decode_header
-from html import unescape
+from email.utils import parseaddr
+from html import escape, unescape
 from pathlib import Path
 
 DB_PATH = Path("data/growth_engine.db")
@@ -243,6 +245,14 @@ def init_db():
         route TEXT,
         commodity TEXT,
         volume TEXT,
+        cargo_description TEXT,
+        origin TEXT,
+        destination TEXT,
+        weight TEXT,
+        container_type TEXT,
+        quantity TEXT,
+        incoterm TEXT,
+        quotation_status TEXT DEFAULT 'Not Started',
         mode TEXT,
         stage TEXT DEFAULT 'Interested',
         trade_lane TEXT,
@@ -437,6 +447,7 @@ def init_db():
         subject TEXT,
         message_body TEXT,
         message_version INTEGER DEFAULT 1,
+        tracking_token TEXT,
         status TEXT DEFAULT 'Draft',
         delivery_status TEXT DEFAULT 'Unknown',
         sent_at TEXT,
@@ -450,6 +461,18 @@ def init_db():
         FOREIGN KEY(lead_id) REFERENCES leads(id),
         FOREIGN KEY(organization_id) REFERENCES organizations(id),
         FOREIGN KEY(contact_id) REFERENCES contacts(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS processed_reply_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL UNIQUE,
+        processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        outreach_message_id INTEGER,
+        sender_email TEXT,
+        subject TEXT,
+        FOREIGN KEY(outreach_message_id) REFERENCES outreach_messages(id)
     )
     """)
 
@@ -577,6 +600,30 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_intelligence (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        intelligence_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        entity_name TEXT,
+        country TEXT,
+        lane TEXT,
+        commodity TEXT,
+        hs_code TEXT,
+        summary TEXT,
+        details TEXT,
+        source TEXT,
+        source_type TEXT,
+        source_id INTEGER,
+        confidence TEXT DEFAULT 'Medium',
+        tags TEXT,
+        status TEXT DEFAULT 'Active',
+        created_by TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         contact_id INTEGER,
@@ -618,6 +665,7 @@ def init_db():
     add_column("outreach_campaigns", "sent_at TEXT")
     add_column("outreach_campaigns", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
     add_column("outreach_messages", "message_version INTEGER DEFAULT 1")
+    add_column("outreach_messages", "tracking_token TEXT")
     add_column("outreach_messages", "delivery_status TEXT DEFAULT 'Unknown'")
     add_column("outreach_messages", "opened_at TEXT")
     add_column("outreach_messages", "replied_at TEXT")
@@ -669,9 +717,29 @@ def init_db():
     add_column("knowledge_sops", "status TEXT DEFAULT 'Active'")
     add_column("knowledge_sops", "created_by TEXT")
     add_column("knowledge_sops", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+    add_column("knowledge_intelligence", "intelligence_type TEXT")
+    add_column("knowledge_intelligence", "title TEXT")
+    add_column("knowledge_intelligence", "entity_name TEXT")
+    add_column("knowledge_intelligence", "country TEXT")
+    add_column("knowledge_intelligence", "lane TEXT")
+    add_column("knowledge_intelligence", "commodity TEXT")
+    add_column("knowledge_intelligence", "hs_code TEXT")
+    add_column("knowledge_intelligence", "summary TEXT")
+    add_column("knowledge_intelligence", "details TEXT")
+    add_column("knowledge_intelligence", "source TEXT")
+    add_column("knowledge_intelligence", "source_type TEXT")
+    add_column("knowledge_intelligence", "source_id INTEGER")
+    add_column("knowledge_intelligence", "confidence TEXT DEFAULT 'Medium'")
+    add_column("knowledge_intelligence", "tags TEXT")
+    add_column("knowledge_intelligence", "status TEXT DEFAULT 'Active'")
+    add_column("knowledge_intelligence", "created_by TEXT")
+    add_column("knowledge_intelligence", "updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
     add_column("processed_bounce_messages", "bounced_email TEXT")
     add_column("processed_bounce_messages", "bounce_type TEXT")
     add_column("processed_bounce_messages", "reason TEXT")
+    add_column("processed_reply_messages", "outreach_message_id INTEGER")
+    add_column("processed_reply_messages", "sender_email TEXT")
+    add_column("processed_reply_messages", "subject TEXT")
     add_column("tasks", "assigned_to INTEGER")
     add_column("tasks", "created_by INTEGER")
     add_column("activities", "lead_id INTEGER")
@@ -683,6 +751,14 @@ def init_db():
     add_column("opportunities", "stage TEXT DEFAULT 'Interested'")
     add_column("opportunities", "trade_lane TEXT")
     add_column("opportunities", "service_type TEXT")
+    add_column("opportunities", "cargo_description TEXT")
+    add_column("opportunities", "origin TEXT")
+    add_column("opportunities", "destination TEXT")
+    add_column("opportunities", "weight TEXT")
+    add_column("opportunities", "container_type TEXT")
+    add_column("opportunities", "quantity TEXT")
+    add_column("opportunities", "incoterm TEXT")
+    add_column("opportunities", "quotation_status TEXT DEFAULT 'Not Started'")
     add_column("opportunities", "potential_revenue REAL DEFAULT 0")
     add_column("opportunities", "potential_profit REAL DEFAULT 0")
     add_column("opportunities", "expected_close_date TEXT")
@@ -2028,6 +2104,109 @@ def seed_knowledge_base(cur):
             ),
         )
 
+    intelligence_samples = [
+        (
+            "Lessons Learned",
+            "Quote only after compliance evidence is attached",
+            "Internal",
+            "Vietnam",
+            "",
+            "Networking equipment",
+            "",
+            "Do not send a confident compliance conclusion from memory.",
+            "When a shipment involves regulated equipment such as routers, firewalls, food, batteries, medical devices, or cryptography risk, attach legal basis or approved case evidence before quotation.",
+            "Internal operating lesson",
+            "High",
+            "lessons learned, compliance, quotation",
+        ),
+        (
+            "Market Intelligence",
+            "China forwarders value Vietnam local execution speed",
+            "China network",
+            "China",
+            "China - Vietnam",
+            "General cargo",
+            "",
+            "China agent outreach should emphasize Vietnam operations response time and customs handling.",
+            "For Chinese forwarders, useful positioning includes fast Vietnam customs check, destination handling, DDP feasibility review, and clear exception feedback.",
+            "CRM strategy",
+            "Medium",
+            "market intelligence, China, Vietnam, agents",
+        ),
+        (
+            "Vendor Intelligence",
+            "Vendor evaluation should capture lane, strength, and risk",
+            "Vendor Network",
+            "Vietnam",
+            "Vietnam domestic",
+            "General cargo",
+            "",
+            "Vendor notes should separate strengths from risks.",
+            "Track response speed, quote accuracy, document discipline, billing behavior, and whether vendor is suitable for urgent jobs or only routine shipments.",
+            "Internal vendor standard",
+            "Medium",
+            "vendor intelligence, operations, risk",
+        ),
+        (
+            "Customer Intelligence",
+            "Customer-specific know-how belongs in Knowledge Base",
+            "Customer Network",
+            "",
+            "",
+            "",
+            "",
+            "Store customer preferences, document habits, commodity patterns, and hidden risks.",
+            "Customer intelligence should help sales and operations remember what matters for each customer: decision maker, preferred channel, quote style, compliance sensitivity, payment behavior, and historical pain points.",
+            "Internal CRM standard",
+            "Medium",
+            "customer intelligence, relationship, retention",
+        ),
+        (
+            "Shipment History Intelligence",
+            "Shipment history should become reusable operations memory",
+            "Operations",
+            "Vietnam",
+            "",
+            "",
+            "",
+            "Past shipment outcomes should help future quotation and risk review.",
+            "Capture what happened, what delayed the shipment, which documents were missing, vendor performance, customs notes, final cost variance, and what should be repeated or avoided next time.",
+            "Internal operations standard",
+            "Medium",
+            "shipment history, lessons learned, operations",
+        ),
+    ]
+    for sample in intelligence_samples:
+        if cur.execute(
+            "SELECT 1 FROM knowledge_intelligence WHERE intelligence_type = ? AND title = ?",
+            (sample[0], sample[1]),
+        ).fetchone():
+            continue
+        cur.execute(
+            """
+            INSERT INTO knowledge_intelligence (
+                intelligence_type,
+                title,
+                entity_name,
+                country,
+                lane,
+                commodity,
+                hs_code,
+                summary,
+                details,
+                source,
+                confidence,
+                tags,
+                status,
+                created_by,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', 'system', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            sample,
+        )
+
 
 def seed_quotation_templates(cur):
     cur.execute(
@@ -2218,9 +2397,9 @@ def create_inquiry(inquiry_text):
     conn.close()
 
 
-def create_inquiry_opportunity(record, user="admin"):
+def create_opportunity(data, user="admin"):
     today = date.today().isoformat()
-    clean_record = {key: clean_value(value) for key, value in (record or {}).items()}
+    clean_record = {key: clean_value(value) for key, value in (data or {}).items()}
 
     conn = get_connection()
     cur = conn.cursor()
@@ -2234,11 +2413,26 @@ def create_inquiry_opportunity(record, user="admin"):
     ).fetchone()
     admin_user_id = admin_user["id"] if admin_user else None
 
-    organization_id = None
-    contact_id = None
-    if clean_record.get("company_name"):
+    organization_id = clean_record.get("organization_id") or None
+    contact_id = clean_record.get("contact_id") or None
+
+    if clean_record.get("lead_id") and (not organization_id or not contact_id):
+        lead = cur.execute(
+            """
+            SELECT organization_id, contact_id
+            FROM leads
+            WHERE id = ?
+            """,
+            (clean_record.get("lead_id"),),
+        ).fetchone()
+        if lead:
+            organization_id = organization_id or lead["organization_id"]
+            contact_id = contact_id or lead["contact_id"]
+
+    company_name = clean_record.get("company_name") or clean_record.get("organization")
+    if company_name and (not organization_id or not contact_id):
         crm_record = {
-            "company_name": clean_record.get("company_name"),
+            "company_name": company_name,
             "contact_person": clean_record.get("contact_person"),
             "country": clean_record.get("country"),
             "city": clean_record.get("city"),
@@ -2250,11 +2444,11 @@ def create_inquiry_opportunity(record, user="admin"):
             "status": "Inquiry",
             "notes": clean_record.get("raw_text"),
         }
-        organization_id = upsert_organization(cur, crm_record)
-        contact_id = upsert_contact(cur, organization_id, crm_record)
+        organization_id = organization_id or upsert_organization(cur, crm_record)
+        contact_id = contact_id or upsert_contact(cur, organization_id, crm_record)
 
     opportunity_name = clean_record.get("opportunity_name") or clean_record.get("subject") or "Inbound Inquiry"
-    stage = normalize_opportunity_stage(clean_record.get("stage") or "Quote Requested")
+    stage = normalize_opportunity_stage(clean_record.get("stage") or "Interested")
     status = opportunity_status_from_stage(stage)
     inquiry_date = clean_record.get("inquiry_date") or today
     notes = clean_record.get("notes")
@@ -2274,7 +2468,18 @@ def create_inquiry_opportunity(record, user="admin"):
             route,
             commodity,
             volume,
+            cargo_description,
+            origin,
+            destination,
+            weight,
+            container_type,
+            quantity,
+            incoterm,
+            quotation_status,
             mode,
+            potential_revenue,
+            potential_profit,
+            expected_close_date,
             next_action,
             next_action_date,
             notes,
@@ -2295,10 +2500,21 @@ def create_inquiry_opportunity(record, user="admin"):
             status,
             clean_record.get("trade_lane"),
             clean_record.get("service_type"),
-            clean_record.get("trade_lane"),
-            clean_record.get("commodity"),
+            clean_record.get("trade_lane") or build_route(clean_record.get("origin"), clean_record.get("destination")),
+            clean_record.get("commodity") or clean_record.get("cargo_description"),
             clean_record.get("volume"),
+            clean_record.get("cargo_description") or clean_record.get("commodity"),
+            clean_record.get("origin"),
+            clean_record.get("destination"),
+            clean_record.get("weight"),
+            clean_record.get("container_type"),
+            clean_record.get("quantity"),
+            clean_record.get("incoterm"),
+            clean_record.get("quotation_status") or "Not Started",
             clean_record.get("mode"),
+            parse_money(clean_record.get("potential_revenue")),
+            parse_money(clean_record.get("potential_profit")),
+            clean_record.get("expected_close_date") or clean_record.get("deadline"),
             clean_record.get("next_action") or "Prepare quotation",
             clean_record.get("next_action_date") or today,
             notes,
@@ -2308,35 +2524,37 @@ def create_inquiry_opportunity(record, user="admin"):
     )
     opportunity_id = cur.lastrowid
 
-    cur.execute(
-        """
-        INSERT INTO tasks (
-            opportunity_id,
-            task_type,
-            title,
-            due_date,
-            status,
-            priority,
-            assigned_to,
-            created_by
+    task_id = None
+    if clean_record.get("create_prepare_quote_task") in ["1", "true", "True", "yes", "Yes"]:
+        cur.execute(
+            """
+            INSERT INTO tasks (
+                opportunity_id,
+                task_type,
+                title,
+                due_date,
+                status,
+                priority,
+                assigned_to,
+                created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                opportunity_id,
+                "prepare_quote",
+                "Prepare quote: " + opportunity_name[:60],
+                clean_record.get("next_action_date") or today,
+                "open",
+                "high",
+                admin_user_id,
+                admin_user_id,
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            opportunity_id,
-            "prepare_quote",
-            "Prepare quote: " + opportunity_name[:60],
-            clean_record.get("next_action_date") or today,
-            "open",
-            "high",
-            admin_user_id,
-            admin_user_id,
-        ),
-    )
-    task_id = cur.lastrowid
+        task_id = cur.lastrowid
 
     activity_lines = [
-        f"Inquiry received: {opportunity_name}",
+        f"Opportunity created: {opportunity_name}",
         f"Trade lane: {clean_record.get('trade_lane') or '-'}",
         f"Service: {clean_record.get('service_type') or '-'}",
     ]
@@ -2347,7 +2565,7 @@ def create_inquiry_opportunity(record, user="admin"):
 
     log_crm_activity(
         cur,
-        "Inquiry Received",
+        clean_record.get("activity_type") or "Opportunity Update",
         "\n".join(activity_lines),
         organization_id=organization_id,
         contact_id=contact_id,
@@ -2363,6 +2581,22 @@ def create_inquiry_opportunity(record, user="admin"):
         "organization_id": organization_id,
         "contact_id": contact_id,
     }
+
+
+def build_route(origin, destination):
+    origin = clean_value(origin)
+    destination = clean_value(destination)
+    if origin and destination:
+        return f"{origin} -> {destination}"
+    return origin or destination
+
+
+def create_inquiry_opportunity(record, user="admin"):
+    inquiry_record = dict(record or {})
+    inquiry_record["stage"] = inquiry_record.get("stage") or "Quote Requested"
+    inquiry_record["activity_type"] = "Inquiry Received"
+    inquiry_record["create_prepare_quote_task"] = "1"
+    return create_opportunity(inquiry_record, user=user)
 
 
 def mark_prepare_quote_sent(task_id, follow_up_date, current_user_id=None):
@@ -2539,6 +2773,154 @@ def get_open_tasks():
 
     conn.close()
     return tasks
+
+
+def get_quote_follow_up_tasks():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            tasks.*,
+            quotations.quote_no,
+            quotations.quote_date,
+            quotations.follow_up_date AS quotation_follow_up_date,
+            quotations.currency,
+            quotations.sell_amount,
+            quotations.status AS quotation_status,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_title,
+            organizations.name AS organization_name,
+            contacts.name AS contact_name
+        FROM tasks
+        LEFT JOIN quotations ON quotations.id = tasks.quotation_id
+        LEFT JOIN opportunities ON opportunities.id = tasks.opportunity_id
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+        WHERE tasks.status = 'open'
+            AND tasks.task_type = 'quote_follow_up'
+        ORDER BY
+            tasks.due_date,
+            CASE tasks.priority
+                WHEN 'high' THEN 1
+                WHEN 'normal' THEN 2
+                ELSE 3
+            END,
+            tasks.created_at DESC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def complete_quote_follow_up_task(task_id, channel, next_follow_up_date=None, note="", user="admin"):
+    clean_channel = clean_value(channel) or "Email"
+    clean_note = clean_value(note)
+    clean_next_date = clean_value(next_follow_up_date)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    task = cur.execute(
+        """
+        SELECT
+            tasks.*,
+            quotations.quote_no,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_title,
+            opportunities.organization_id,
+            opportunities.contact_id
+        FROM tasks
+        LEFT JOIN quotations ON quotations.id = tasks.quotation_id
+        LEFT JOIN opportunities ON opportunities.id = tasks.opportunity_id
+        WHERE tasks.id = ?
+            AND tasks.task_type = 'quote_follow_up'
+            AND tasks.status = 'open'
+        """,
+        (task_id,),
+    ).fetchone()
+
+    if not task:
+        conn.close()
+        return False
+
+    cur.execute(
+        """
+        UPDATE tasks
+        SET status = ?,
+            channel = ?,
+            completed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        ("closed", clean_channel, task_id),
+    )
+
+    opportunity_title = row_value(task, "opportunity_title", "") or row_value(task, "title", "")
+    activity_lines = [
+        f"{clean_channel} follow-up completed",
+        f"Quote: {row_value(task, 'quote_no', '-')}",
+        f"Opportunity: {opportunity_title or '-'}",
+    ]
+    if clean_note:
+        activity_lines.append(f"Note: {clean_note}")
+    if clean_next_date:
+        activity_lines.append(f"Next follow-up: {clean_next_date}")
+
+    log_crm_activity(
+        cur,
+        f"Quote Follow-up - {clean_channel}",
+        "\n".join(activity_lines),
+        organization_id=row_value(task, "organization_id", None),
+        contact_id=row_value(task, "contact_id", None),
+        opportunity_id=row_value(task, "opportunity_id", None),
+        quotation_id=row_value(task, "quotation_id", None),
+        user=user,
+    )
+
+    if clean_next_date:
+        title = "Follow up quote: " + (opportunity_title or row_value(task, "quote_no", "Quotation"))
+        cur.execute(
+            """
+            INSERT INTO tasks (
+                contact_id,
+                opportunity_id,
+                quotation_id,
+                task_type,
+                title,
+                channel,
+                due_date,
+                status,
+                priority,
+                assigned_to,
+                created_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row_value(task, "contact_id", None),
+                row_value(task, "opportunity_id", None),
+                row_value(task, "quotation_id", None),
+                "quote_follow_up",
+                title,
+                clean_channel,
+                clean_next_date,
+                "open",
+                "high",
+                row_value(task, "assigned_to", None),
+                row_value(task, "created_by", None),
+            ),
+        )
+
+        if row_value(task, "quotation_id", None):
+            cur.execute(
+                """
+                UPDATE quotations
+                SET follow_up_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (clean_next_date, row_value(task, "quotation_id", None)),
+            )
+
+    conn.commit()
+    conn.close()
+    return True
 
 
 def get_task_counts_by_type():
@@ -2764,7 +3146,36 @@ def strip_html(value):
     return unescape(text).strip()
 
 
-def send_email_via_smtp(to_email, subject, message_body):
+def html_from_plain_text(value):
+    return "<br>\n".join(escape(value or "").splitlines())
+
+
+def get_tracking_base_url():
+    return clean_value(get_app_setting("tracking_base_url", ""))
+
+
+def build_tracking_url(token):
+    base_url = get_tracking_base_url().rstrip("/")
+    if not base_url or not token:
+        return ""
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}track_open={token}"
+
+
+def append_tracking_pixel(message_body, tracking_token=""):
+    tracking_url = build_tracking_url(tracking_token)
+    if not tracking_url:
+        return message_body
+    pixel = (
+        f'<img src="{escape(tracking_url)}" width="1" height="1" '
+        'alt="" style="display:none;border:0;opacity:0;width:1px;height:1px;" />'
+    )
+    if looks_like_html(message_body):
+        return f"{message_body}\n{pixel}"
+    return f"{html_from_plain_text(message_body)}<br>\n{pixel}"
+
+
+def send_email_via_smtp(to_email, subject, message_body, tracking_token=""):
     settings = get_smtp_settings()
     if not is_smtp_configured():
         return False, "SMTP settings are not configured."
@@ -2777,11 +3188,15 @@ def send_email_via_smtp(to_email, subject, message_body):
         else settings["from_email"]
     )
     message["To"] = to_email
-    if looks_like_html(message_body):
+    if tracking_token:
+        message["Message-ID"] = f"<{tracking_token}@1aimgrowthengine.local>"
+        message["X-1Aim-Tracking-Token"] = tracking_token
+    tracked_body = append_tracking_pixel(message_body, tracking_token)
+    if looks_like_html(tracked_body):
         message.set_content(strip_html(message_body))
-        message.add_alternative(message_body.replace("\n", "<br>\n"), subtype="html")
+        message.add_alternative(tracked_body.replace("\n", "<br>\n"), subtype="html")
     else:
-        message.set_content(message_body)
+        message.set_content(tracked_body)
 
     try:
         with open_smtp_connection(settings, timeout=30) as server:
@@ -2809,6 +3224,53 @@ def send_outreach_preview_email(to_email, messages, limit=3):
             failed += 1
             errors.append(error_message)
     return {"sent": sent, "failed": failed, "errors": errors}
+
+
+def record_outreach_open(tracking_token, user_agent=""):
+    token = clean_value(tracking_token)
+    if not token:
+        return {"ok": False, "message": "Missing tracking token."}
+    conn = get_connection()
+    cur = conn.cursor()
+    row = cur.execute(
+        """
+        SELECT *
+        FROM outreach_messages
+        WHERE tracking_token = ?
+        LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return {"ok": False, "message": "Tracking token not found."}
+    first_open = not clean_value(row["opened_at"])
+    cur.execute(
+        """
+        UPDATE outreach_messages
+        SET opened_at = COALESCE(opened_at, CURRENT_TIMESTAMP),
+            delivery_status = CASE
+                WHEN delivery_status IN ('Sent', 'Unknown', '') THEN 'Delivered'
+                ELSE delivery_status
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (row["id"],),
+    )
+    if first_open:
+        log_crm_activity(
+            cur,
+            "Email Opened",
+            f"Campaign email opened: {row['subject']} ({row['email']})",
+            lead_id=row["lead_id"],
+            organization_id=row["organization_id"],
+            contact_id=row["contact_id"],
+            user="tracking",
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": "Open tracked.", "first_open": first_open}
 
 
 BOUNCE_SUBJECT_MARKERS = [
@@ -3204,6 +3666,201 @@ def process_email_bounces(max_messages=100, user="admin"):
     return result
 
 
+def normalize_email_subject(subject):
+    value = clean_value(subject).lower()
+    value = re.sub(r"^\s*(re|fw|fwd)\s*:\s*", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def find_outreach_reply_match(cur, sender_email, subject, body, headers_text):
+    token_match = re.search(r"([a-f0-9]{32})@1aimgrowthengine\.local", headers_text or "", flags=re.IGNORECASE)
+    if not token_match:
+        token_match = re.search(r"\b([a-f0-9]{32})\b", (headers_text or "") + "\n" + (body or ""), flags=re.IGNORECASE)
+    if token_match:
+        row = cur.execute(
+            """
+            SELECT *
+            FROM outreach_messages
+            WHERE tracking_token = ?
+            ORDER BY sent_at DESC, id DESC
+            LIMIT 1
+            """,
+            (token_match.group(1),),
+        ).fetchone()
+        if row:
+            return row
+
+    clean_sender = clean_value(sender_email).lower()
+    clean_subject = normalize_email_subject(subject)
+    if not clean_sender:
+        return None
+    rows = cur.execute(
+        """
+        SELECT *
+        FROM outreach_messages
+        WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
+            AND status = 'Sent'
+        ORDER BY sent_at DESC, id DESC
+        LIMIT 20
+        """,
+        (clean_sender,),
+    ).fetchall()
+    for row in rows:
+        outbound_subject = normalize_email_subject(row["subject"])
+        if clean_subject and outbound_subject and (clean_subject == outbound_subject or outbound_subject in clean_subject):
+            return row
+    return rows[0] if rows else None
+
+
+def record_processed_reply(cur, message_id, outreach_message_id, sender_email, subject):
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO processed_reply_messages (
+            message_id,
+            outreach_message_id,
+            sender_email,
+            subject,
+            processed_at
+        )
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (message_id, outreach_message_id, sender_email, subject),
+    )
+
+
+def process_email_replies(max_messages=100, user="admin"):
+    settings = get_smtp_settings()
+    username = settings.get("username")
+    password = settings.get("password")
+    host = get_app_setting("imap_host", "mail.1aimlogistics.com")
+    try:
+        port = int(get_app_setting("imap_port", "993") or 993)
+    except (TypeError, ValueError):
+        port = 993
+
+    result = {"scanned": 0, "replies_found": 0, "messages_updated": 0, "unmatched": [], "errors": []}
+    if not username or not password:
+        result["errors"].append("IMAP username/password missing. Save SMTP username and password first.")
+        return result
+
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        with imaplib.IMAP4_SSL(host, port) as mailbox:
+            mailbox.login(username, password)
+            mailbox.select("INBOX")
+            status, data = mailbox.search(None, "ALL")
+            if status != "OK":
+                result["errors"].append("Unable to search mailbox.")
+                return result
+            message_ids = data[0].split()[-int(max_messages):]
+            for message_id_bytes in reversed(message_ids):
+                imap_id = message_id_bytes.decode()
+                fetch_status, fetch_data = mailbox.fetch(message_id_bytes, "(RFC822)")
+                if fetch_status != "OK" or not fetch_data or not fetch_data[0]:
+                    continue
+                raw_message = fetch_data[0][1]
+                message = email.message_from_bytes(raw_message)
+                mail_message_id = message.get("Message-ID") or f"reply-imap:{imap_id}"
+                already_processed = cur.execute(
+                    "SELECT 1 FROM processed_reply_messages WHERE message_id = ?",
+                    (mail_message_id,),
+                ).fetchone()
+                if already_processed:
+                    continue
+
+                subject = decode_mime_header(message.get("Subject", ""))
+                subject_lower = subject.lower()
+                if any(marker in subject_lower for marker in BOUNCE_SUBJECT_MARKERS):
+                    continue
+                sender_email = parseaddr(message.get("From", ""))[1]
+                if sender_email.lower() == clean_value(settings.get("from_email")).lower():
+                    continue
+                if not subject_lower.startswith(("re:", "fw:", "fwd:")) and "@1aimgrowthengine.local" not in (
+                    (message.get("In-Reply-To", "") or "") + (message.get("References", "") or "")
+                ):
+                    continue
+
+                result["scanned"] += 1
+                body = extract_message_text(message)
+                headers_text = "\n".join(
+                    [
+                        message.get("In-Reply-To", "") or "",
+                        message.get("References", "") or "",
+                        message.get("X-1Aim-Tracking-Token", "") or "",
+                    ]
+                )
+                matched = find_outreach_reply_match(cur, sender_email, subject, body, headers_text)
+                if not matched:
+                    result["unmatched"].append(f"{sender_email} | {subject}")
+                    record_processed_reply(cur, mail_message_id, None, sender_email, subject)
+                    continue
+
+                result["replies_found"] += 1
+                cur.execute(
+                    """
+                    UPDATE outreach_messages
+                    SET replied_at = COALESCE(replied_at, CURRENT_TIMESTAMP),
+                        delivery_status = 'Replied',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (matched["id"],),
+                )
+                cur.execute(
+                    """
+                    UPDATE leads
+                    SET lead_status = CASE
+                            WHEN lead_status IN ('Qualified', 'Converted', 'Disqualified') THEN lead_status
+                            ELSE 'Replied'
+                        END,
+                        status = CASE
+                            WHEN status IN ('Qualified', 'Converted', 'Disqualified') THEN status
+                            ELSE 'Replied'
+                        END,
+                        next_action = 'Continue conversation / ask for Vietnam shipments',
+                        next_action_date = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (days_from_today(14), matched["lead_id"]),
+                )
+                if matched["contact_id"]:
+                    cur.execute(
+                        """
+                        UPDATE contacts
+                        SET relationship_status = CASE
+                                WHEN relationship_status IN ('Active', 'Inactive') THEN relationship_status
+                                ELSE 'Warm'
+                            END,
+                            last_contacted_at = CURRENT_TIMESTAMP,
+                            next_follow_up_at = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (days_from_today(14), matched["contact_id"]),
+                    )
+                log_crm_activity(
+                    cur,
+                    "Email Replied",
+                    f"Reply detected from {sender_email}: {subject}",
+                    lead_id=matched["lead_id"],
+                    organization_id=matched["organization_id"],
+                    contact_id=matched["contact_id"],
+                    user=user,
+                )
+                record_processed_reply(cur, mail_message_id, matched["id"], sender_email, subject)
+                result["messages_updated"] += 1
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        result["errors"].append(str(exc))
+    finally:
+        conn.close()
+    return result
+
+
 def get_campaign_filter_options():
     conn = get_connection()
     rows = conn.execute(
@@ -3504,10 +4161,12 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, subject_
 
     results = {"sent": 0, "failed": 0, "skipped": 0, "campaign_id": campaign_id, "failed_messages": []}
     for message in messages:
+        tracking_token = uuid.uuid4().hex
         ok, error_message = send_email_via_smtp(
             message["email"],
             message["subject"],
             message["message_body"],
+            tracking_token=tracking_token,
         )
         status = "Sent" if ok else "Failed"
         sent_at = datetime.now().isoformat(timespec="seconds") if ok else None
@@ -3522,6 +4181,7 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, subject_
                 subject,
                 message_body,
                 message_version,
+                tracking_token,
                 status,
                 delivery_status,
                 sent_at,
@@ -3529,7 +4189,7 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, subject_
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             (
                 campaign_id,
@@ -3540,6 +4200,7 @@ def create_and_send_outreach_campaign(campaign_name, filters, messages, subject_
                 message.get("subject"),
                 message.get("message_body"),
                 int(message.get("message_version") or 1),
+                tracking_token,
                 status,
                 status,
                 sent_at,
@@ -5478,6 +6139,61 @@ def update_quotation_status(quotation_id, status, user="admin"):
             """,
             (quotation["opportunity_id"],),
         )
+    if normalized_status == "Sent":
+        existing_follow_up = cur.execute(
+            """
+            SELECT id
+            FROM tasks
+            WHERE quotation_id = ?
+                AND task_type = 'quote_follow_up'
+                AND status = 'open'
+            LIMIT 1
+            """,
+            (quotation_id,),
+        ).fetchone()
+        if not existing_follow_up:
+            follow_up_date = row_value(quotation, "follow_up_date", "") or days_from_today(3)
+            task_title = "Follow up quote: " + (
+                row_value(quotation, "quote_no", "")
+                or row_value(quotation, "customer_name", "")
+                or "Quotation"
+            )
+            cur.execute(
+                """
+                INSERT INTO tasks (
+                    opportunity_id,
+                    quotation_id,
+                    task_type,
+                    title,
+                    due_date,
+                    status,
+                    priority,
+                    assigned_to,
+                    created_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    quotation["opportunity_id"],
+                    quotation_id,
+                    "quote_follow_up",
+                    task_title,
+                    follow_up_date,
+                    "open",
+                    "high",
+                    row_value(quotation, "owner", None),
+                    row_value(quotation, "owner", None),
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE quotations
+                SET follow_up_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (follow_up_date, quotation_id),
+            )
     log_crm_activity(
         cur,
         "Quotation Approval",

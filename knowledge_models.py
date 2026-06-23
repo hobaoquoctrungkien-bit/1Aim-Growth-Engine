@@ -97,3 +97,27 @@ class KnowledgeSOP(Base):
     created_by = Column(String)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class KnowledgeIntelligence(Base):
+    __tablename__ = "knowledge_intelligence"
+
+    id = Column(Integer, primary_key=True)
+    intelligence_type = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    entity_name = Column(String)
+    country = Column(String)
+    lane = Column(String)
+    commodity = Column(String)
+    hs_code = Column(String)
+    summary = Column(Text)
+    details = Column(Text)
+    source = Column(Text)
+    source_type = Column(String)
+    source_id = Column(Integer)
+    confidence = Column(String, default="Medium")
+    tags = Column(Text)
+    status = Column(String, default="Active")
+    created_by = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

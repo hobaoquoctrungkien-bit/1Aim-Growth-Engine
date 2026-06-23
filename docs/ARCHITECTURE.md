@@ -37,6 +37,7 @@ Core CRM tables:
 - `knowledge_tags`
 - `knowledge_document_tags`
 - `knowledge_sops`
+- `knowledge_intelligence`
 - `backup_history`
 - `vendor_rates`
 
@@ -181,6 +182,7 @@ Sub-pages:
 - SOP Library
 - Case Library
 - AI Assistant
+- Intelligence Library
 
 Tables:
 
@@ -190,6 +192,7 @@ Tables:
 - `knowledge_tags`: reusable tags such as customs, food, DG, CO, DDP, IOR, EOR, FDA.
 - `knowledge_document_tags`: document/tag join table.
 - `knowledge_sops`: internal SOPs with purpose, steps, checklist, related documents, and related cases.
+- `knowledge_intelligence`: reusable business intelligence records for lessons learned, market intelligence, vendor intelligence, customer intelligence, and shipment history intelligence.
 
 Service layer:
 
@@ -200,12 +203,14 @@ Functions:
 - `search_documents()`
 - `search_cases()`
 - `search_sops()`
+- `search_intelligence()`
 - `extract_uploaded_text()`
 - `parse_legal_document_text()`
+- `save_intelligence()`
 - `retrieve_context()`
 - `generate_answer()`
 
-`generate_answer()` is evidence-only in V1. It searches stored cases, SOPs, documents, and approved chunks. If no supporting evidence exists, it returns "Insufficient information in knowledge base." It does not call external AI providers.
+`generate_answer()` is evidence-only in V1. It searches stored cases, SOPs, documents, approved chunks, and active intelligence records. If no supporting evidence exists, it returns "Insufficient information in knowledge base." It does not call external AI providers.
 
 Auto-parsed legal clauses are created with `status = pending_review` until the user approves them in the Legal Library review screen. Pending review chunks are not returned by `search_chunks()` and are not visible to the AI Assistant.
 
@@ -222,6 +227,16 @@ Uploads:
 - DOCX extraction uses `python-docx`.
 - The Legal Library upload flow has four steps: upload file, extract and auto-fill, review parsed information, approve key clauses, then save.
 - Vietnamese legal parser rules detect document number, document type, issuing authority, issue/effective dates, expiry/replacement phrases, category, tags, summary, and likely key clauses.
+
+Intelligence Library:
+
+- Stores `Lessons Learned`, `Market Intelligence`, `Vendor Intelligence`, `Customer Intelligence`, and `Shipment History Intelligence`.
+- Uses one V1 table to avoid fragmented intelligence objects too early.
+- Fields include entity, country, lane, commodity, HS code, summary, details, source, source type, source ID, confidence, tags, and status.
+- Active intelligence records are included in Knowledge Base AI Assistant context.
+- Opportunity Detail can save the current opportunity as an intelligence record.
+- Quotation Detail can save the current quotation as an intelligence record.
+- `source_type` and `source_id` prepare the same workflow for future shipment/job records without changing the intelligence table again.
 
 ## Outreach Campaigns
 
@@ -247,10 +262,31 @@ The Outreach Campaigns page supports:
 - SMTP delivery using settings stored in `app_settings`
 - SMTP test email from Admin using the same saved settings
 - SMTP connection test from Admin without sending email
+- Open tracking with per-message `tracking_token`, tracking pixel URL, and `opened_at`
+- Reply tracking by IMAP scan, token/subject/sender matching, and `replied_at`
 - CRM updates after successful send
 - Campaign metrics
 
 SMTP settings and email signature settings are stored in `app_settings`.
+
+Open tracking setting:
+
+- `tracking_base_url`
+
+The tracking base URL must be reachable by the recipient email client. Localhost URLs do not produce reliable open tracking outside local testing.
+
+Outbound campaign emails include:
+
+- `outreach_messages.tracking_token`
+- `Message-ID: <tracking_token@1aimgrowthengine.local>`
+- `X-1Aim-Tracking-Token`
+- hidden tracking pixel when `tracking_base_url` is configured
+
+When `?track_open=<token>` is requested, the app updates the matching outreach message:
+
+- `opened_at`
+- `delivery_status = Delivered` when the prior state was Sent or Unknown
+- first open creates an `Email Opened` activity
 
 Email signature setting keys:
 
@@ -293,6 +329,28 @@ Bounce processing:
 - Does not delete mailbox messages in V1.
 
 Admin also includes Invalid / Bounced Email Cleanup.
+
+## Email Reply Processing
+
+Admin includes Email Tracking.
+
+Reply processing reads mailbox messages by IMAP using the saved SMTP username/password and IMAP host/port settings.
+
+Reply matching order:
+
+1. Tracking token in `In-Reply-To`, `References`, `X-1Aim-Tracking-Token`, or message body.
+2. Sender email plus normalized `Re:` / `Fwd:` subject fallback.
+3. Latest sent outreach message for that sender as last-resort fallback.
+
+When a reply is detected:
+
+- `outreach_messages.replied_at` is set.
+- `outreach_messages.delivery_status = Replied`.
+- linked lead moves to `Replied` unless already Qualified, Converted, or Disqualified.
+- linked contact becomes Warm unless already Active or Inactive.
+- next follow-up is scheduled for 14 days.
+- an `Email Replied` activity is created.
+- processed mailbox message IDs are stored in `processed_reply_messages`.
 
 The cleanup view queries contacts with `email_status IN ('Bounced', 'Invalid')`, shows company and lead context, and supports:
 

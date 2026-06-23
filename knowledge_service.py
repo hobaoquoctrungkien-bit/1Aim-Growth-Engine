@@ -601,6 +601,106 @@ def save_case(record, case_id=None):
     return saved_id
 
 
+INTELLIGENCE_TYPES = [
+    "Lessons Learned",
+    "Market Intelligence",
+    "Vendor Intelligence",
+    "Customer Intelligence",
+    "Shipment History Intelligence",
+]
+
+
+def search_intelligence(keyword="", intelligence_type="", country="", entity_name="", tags="", limit=100):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM knowledge_intelligence
+        WHERE (? = '' OR LOWER(
+                title || ' ' ||
+                COALESCE(summary, '') || ' ' ||
+                COALESCE(details, '') || ' ' ||
+                COALESCE(source, '') || ' ' ||
+                COALESCE(tags, '')
+            ) LIKE LOWER(?))
+            AND (? = '' OR COALESCE(intelligence_type, '') = ?)
+            AND (? = '' OR LOWER(COALESCE(country, '')) LIKE LOWER(?))
+            AND (? = '' OR LOWER(COALESCE(entity_name, '')) LIKE LOWER(?))
+            AND (? = '' OR LOWER(COALESCE(tags, '')) LIKE LOWER(?))
+            AND COALESCE(status, 'Active') = 'Active'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (
+            clean(keyword),
+            like_query(keyword),
+            clean(intelligence_type),
+            clean(intelligence_type),
+            clean(country),
+            like_query(country),
+            clean(entity_name),
+            like_query(entity_name),
+            clean(tags),
+            like_query(tags),
+            int(limit or 100),
+        ),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_intelligence(record, intelligence_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    values = (
+        clean(record.get("intelligence_type")) or "Lessons Learned",
+        clean(record.get("title")),
+        clean(record.get("entity_name")),
+        clean(record.get("country")),
+        clean(record.get("lane")),
+        clean(record.get("commodity")),
+        clean(record.get("hs_code")),
+        clean(record.get("summary")),
+        clean(record.get("details")),
+        clean(record.get("source")),
+        clean(record.get("source_type")),
+        record.get("source_id") or None,
+        clean(record.get("confidence")) or "Medium",
+        clean(record.get("tags")),
+        clean(record.get("status")) or "Active",
+        clean(record.get("created_by")) or "admin",
+    )
+    if intelligence_id:
+        cur.execute(
+            """
+            UPDATE knowledge_intelligence
+            SET intelligence_type = ?, title = ?, entity_name = ?, country = ?,
+                lane = ?, commodity = ?, hs_code = ?, summary = ?, details = ?,
+                source = ?, source_type = ?, source_id = ?, confidence = ?, tags = ?, status = ?, created_by = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (*values, intelligence_id),
+        )
+        saved_id = intelligence_id
+    else:
+        cur.execute(
+            """
+            INSERT INTO knowledge_intelligence (
+                intelligence_type, title, entity_name, country, lane, commodity,
+                hs_code, summary, details, source, source_type, source_id, confidence, tags, status,
+                created_by, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            values,
+        )
+        saved_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return saved_id
+
+
 def retrieve_context(question, limit=5):
     query = clean(question)
     return {
@@ -608,6 +708,7 @@ def retrieve_context(question, limit=5):
         "sops": search_sops(keyword=query, limit=limit),
         "documents": search_documents(keyword=query, limit=limit),
         "chunks": search_chunks(keyword=query, limit=limit),
+        "intelligence": search_intelligence(keyword=query, limit=limit),
     }
 
 
@@ -621,6 +722,7 @@ def generate_answer(question):
             "relevant_documents": [],
             "applicable_sops": [],
             "related_cases": [],
+            "intelligence": [],
             "risk_notes": "No supporting evidence was found. Do not provide legal or compliance advice from memory.",
             "confidence": "Low",
             "context": context,
@@ -638,10 +740,22 @@ def generate_answer(question):
     ]
     cases = context["cases"]
     sops = context["sops"]
+    intelligence = context["intelligence"]
     legal_basis = "\n".join(
         item for item in [*(case.get("legal_basis") or "" for case in cases), *(chunk.get("content") or "" for chunk in context["chunks"])] if item
     )
-    risk_notes = "\n".join(item for item in (case.get("risk_notes") or "" for case in cases) if item)
+    intelligence_notes = "\n".join(
+        f"{item.get('intelligence_type')}: {item.get('title')} - {item.get('summary') or item.get('details') or ''}"
+        for item in intelligence
+    )
+    risk_notes = "\n".join(
+        item
+        for item in [
+            *(case.get("risk_notes") or "" for case in cases),
+            intelligence_notes,
+        ]
+        if item
+    )
 
     return {
         "conclusion": "Supporting knowledge was found. Review the evidence below before advising customer.",
@@ -649,6 +763,7 @@ def generate_answer(question):
         "relevant_documents": documents,
         "applicable_sops": sops,
         "related_cases": cases,
+        "intelligence": intelligence,
         "risk_notes": risk_notes or "Review applicability, HS code, model details, and current effective date before using this answer.",
         "confidence": "Medium" if legal_basis else "Low",
         "context": context,

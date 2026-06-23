@@ -40,6 +40,14 @@
 - Added per-clause approval review so extracted clauses stay `pending_review` until approved.
 - Updated Knowledge Base AI/search to ignore pending-review legal chunks.
 - Added smoke tests for legal parser extraction and pending-review exclusion.
+- Added Knowledge Intelligence foundation with a typed `knowledge_intelligence` table.
+- Added Intelligence Library for Lessons Learned, Market Intelligence, Vendor Intelligence, Customer Intelligence, and Shipment History Intelligence.
+- Added intelligence search/save service functions and included active intelligence records in Knowledge Base AI Assistant context.
+- Added seed intelligence examples and smoke test coverage for save/search/assistant context.
+- Added `source_type` and `source_id` to Knowledge Intelligence records.
+- Added Opportunity Detail action to save the opportunity as reusable Knowledge Intelligence.
+- Added Quotation Detail action to save the quotation as reusable Knowledge Intelligence.
+- Updated intelligence smoke tests to verify source object linkage.
 - Added Outreach Campaign Engine V2 foundation.
 - Added audience filtering by country, membership, lead status, and relationship status.
 - Added rule-based personalized message generation using contact and organization fields.
@@ -70,6 +78,11 @@
 - Added Admin Email Bounce Processing via IMAP using saved SMTP credentials.
 - Added hard/soft bounce parsing, bounced recipient extraction, contact status updates, bounce activities, and processed message tracking.
 - Added campaign exclusion for contacts marked `Bounced` or `Invalid`.
+- Added Outreach Tracking V1 with per-message tracking tokens, optional open tracking pixel URL, `opened_at`, and `Email Opened` activities.
+- Added Admin Email Tracking settings for public tracking base URL.
+- Added IMAP reply processing with token/sender/subject matching, `replied_at`, `Email Replied` activities, lead status updates, relationship warming, and 14-day follow-up scheduling.
+- Added `processed_reply_messages` table to avoid reprocessing the same reply.
+- Added smoke tests for outreach open tracking and reply token matching.
 - Added manual Lead Detail actions to mark email Valid, Invalid, or Bounced.
 - Added Admin Invalid / Bounced Email Cleanup view with status/search filters, corrected email save, status actions, and Open Lead shortcut.
 - Collapsed Admin modules by default so each maintenance area opens only when clicked.

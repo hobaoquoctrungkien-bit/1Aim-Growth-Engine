@@ -287,6 +287,11 @@ Campaign sending rules:
 - After a successful send, set `next_action_date = today + 7 days`.
 - Log an `Email Sent` activity for each successfully sent message, including campaign name, subject, recipient email, and sent timestamp.
 - Failed recipients must not stop the campaign. Store the recipient error and continue sending remaining emails.
+- Real campaign sends should include a unique tracking token.
+- Preview sends must not include CRM state updates and should not mark outreach messages as sent/opened/replied.
+- Open tracking is valid only when the configured tracking URL is reachable by the recipient email client.
+- Reply tracking is processed through IMAP and should not overwrite Qualified, Converted, or Disqualified lead outcomes.
+- A detected reply should warm the relationship and schedule a follow-up 14 days later.
 
 Campaign metrics:
 
@@ -365,6 +370,11 @@ It stores:
 - Internal SOPs
 - Real-life cases
 - Customer-specific know-how
+- Lessons learned
+- Market intelligence
+- Vendor intelligence
+- Customer intelligence
+- Shipment history intelligence
 
 Knowledge Base is not a generic legal database.
 
@@ -373,6 +383,7 @@ AI Assistant rules:
 - Search Case Library first.
 - Search SOP Library second.
 - Search Legal Library third.
+- Search Intelligence Library as reusable business memory.
 - Answer from stored knowledge only.
 - Never fabricate legal references.
 - If no supporting evidence exists, answer: "Insufficient information in knowledge base."
@@ -389,3 +400,17 @@ Legal upload rules:
 - User approval is required per extracted clause.
 - Rejected or unapproved clauses must not become legal evidence.
 - Manual entry remains available when extraction fails or a document is not uploaded.
+
+Intelligence rules:
+
+- Lessons learned should capture what to repeat or avoid.
+- Market intelligence should capture country, lane, network, and demand signals.
+- Vendor intelligence should capture capability, reliability, strengths, and risks.
+- Customer intelligence should capture preferences, history, decision behavior, and hidden requirements.
+- Shipment history intelligence should capture operational memory from completed or problematic shipments.
+- Intelligence confidence must be visible as High, Medium, or Low.
+- Intelligence should support human judgement, not become automatic advice.
+- Opportunity Detail may save a reviewed opportunity as intelligence when it contains reusable customer, market, sales, or lane learning.
+- Quotation Detail may save a reviewed quotation as intelligence when it contains reusable pricing, customer, lane, or quotation learning.
+- Saving from Opportunity or Quotation must preserve source context through `source_type` and `source_id`.
+- Saving an Opportunity or Quotation as Shipment History Intelligence does not create a shipment/job record. It only captures memory until the shipment module exists.

@@ -104,12 +104,14 @@ Current system alignment:
 - Preview sends and tests must not update CRM relationship state.
 - Invalid, bounced, or unsafe recipients must be excluded by default.
 - Message drafts should be reviewable before sending.
+- Open and reply tracking may support follow-up discipline, but tracking signals should inform human judgement rather than replace it.
 
 Current implementation status:
 
 - Outreach is currently rule-based, with instruction presets and templates.
 - Human approval is required before sending.
 - Include/exclude controls, preview-to-self, quality checks, final approval, bounce handling, and follow-up updates exist.
+- Outreach tracking stores campaign opens and replies when tracking URL/IMAP access is configured.
 
 ## 6. Opportunity Principles
 
@@ -388,3 +390,7 @@ Knowledge Base:
 - Stores laws, decrees, circulars, official letters, internal SOPs, real-life cases, and customer-specific know-how for logistics, customs clearance, import/export compliance, quotation preparation, and shipment operations.
 - Assistant answers only from stored knowledge and must never fabricate legal references.
 - Uploaded legal documents may be auto-parsed, but extracted clauses become AI/search evidence only after human approval.
+- Stores business intelligence assets: lessons learned, market intelligence, vendor intelligence, customer intelligence, and shipment history intelligence.
+- Intelligence records are reusable memory for human decision support, not automatic strategic decisions.
+- Opportunity and Quotation workflows may create intelligence records when useful learning appears before a shipment/job module exists.
+- Source object links must be preserved so future shipment/job intelligence can be traced back to the originating business record.

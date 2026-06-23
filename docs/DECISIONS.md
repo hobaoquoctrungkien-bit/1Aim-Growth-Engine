@@ -3,6 +3,45 @@
 Date: 2026-06-22
 
 Decision:
+Opportunity and Quotation can be saved as Knowledge Intelligence before a shipment/job module exists.
+
+Reason:
+Useful operational memory already appears during inquiry, pricing, quotation, won/lost, and follow-up work. Capturing this as intelligence now improves learning without pretending that full shipment/job records exist.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Knowledge intelligence V1 uses a single typed `knowledge_intelligence` table.
+
+Reason:
+Lessons learned, market intelligence, vendor intelligence, customer intelligence, and shipment history intelligence share the same early workflow: capture source, context, summary, details, confidence, tags, and make them searchable. A single typed table avoids premature fragmentation while preserving a path to split specialized tables later.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
+Outreach open and reply tracking are supporting signals, not automatic sales judgement.
+
+Reason:
+Open and reply signals help Kien prioritize follow-up, but relationship quality and opportunity qualification still require human judgement. Tracking should update activity/follow-up context without replacing sales decisions.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-22
+
+Decision:
 Quotation Engine uses the existing `quotations` table as the quote header, with `quotation_items` for customer-facing line items and `quotation_templates` for reusable quote text.
 
 Reason:

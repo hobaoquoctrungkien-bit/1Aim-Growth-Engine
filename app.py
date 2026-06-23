@@ -43,7 +43,10 @@ from database import (
     get_quotation_detail,
     get_quotation_templates,
     get_quotations,
+    get_quote_follow_up_tasks,
     process_email_bounces,
+    process_email_replies,
+    record_outreach_open,
     get_campaign_audience,
     get_campaign_filter_options,
     get_campaign_invalid_email_skip_count,
@@ -92,6 +95,7 @@ from database import (
     update_organization_customer_action,
     update_opportunity_stage,
     update_quotation_status,
+    complete_quote_follow_up_task,
     OPPORTUNITY_STAGES,
 )
 from inquiry_intake import (
@@ -102,15 +106,18 @@ from inquiry_intake import (
 )
 from typography import DEFAULT_UI_SCALE, UI_SCALE_OPTIONS, get_typography_tokens
 from knowledge_service import (
+    INTELLIGENCE_TYPES,
     extract_uploaded_text,
     generate_answer,
     parse_legal_document_text,
     save_case,
     save_document,
+    save_intelligence,
     save_sop,
     save_uploaded_knowledge_file,
     search_cases,
     search_documents,
+    search_intelligence,
     search_sops,
 )
 from quotation_engine import build_quotation_excel, build_quotation_pdf
@@ -995,6 +1002,101 @@ def read_uploaded_leads_file(uploaded_file, extension, sheet_name, header_row_in
     )
 
 
+def build_quote_follow_up_suggestion(task, channel):
+    quote_no = task.get("quote_no") or "the quotation"
+    customer = task.get("organization_name") or "your team"
+    opportunity = task.get("opportunity_title") or "this shipment"
+    amount = currency_display(task.get("sell_amount"), task.get("currency") or "USD")
+
+    if channel == "WeChat":
+        return (
+            f"Hi, just checking whether you had a chance to review quote {quote_no} "
+            f"for {opportunity}. Happy to adjust details if needed."
+        )
+    if channel == "WhatsApp":
+        return (
+            f"Hi, following up on quote {quote_no} for {opportunity}. "
+            f"Please let me know if the rate or schedule works for you."
+        )
+    return (
+        f"Dear {customer},\n\n"
+        f"I hope you are well. I am following up on quote {quote_no} for {opportunity}"
+        f"{f' ({amount})' if task.get('sell_amount') else ''}.\n\n"
+        "Please let me know if you have any questions or if you would like us to adjust the offer.\n\n"
+        "Best regards,"
+    )
+
+
+def show_quote_follow_up_engine():
+    tasks = get_quote_follow_up_tasks()
+    st.subheader("Quote Follow-up Engine")
+
+    if not tasks:
+        st.info("No open quote follow-ups.")
+        return
+
+    st.caption("Follow up sent quotes, log the channel used, and schedule the next touch.")
+    for task in tasks:
+        label = " | ".join(
+            item for item in [
+                task.get("quote_no"),
+                task.get("organization_name"),
+                task.get("opportunity_title") or task.get("title"),
+            ]
+            if item
+        )
+        with st.container(border=True):
+            st.markdown(f"**{label or task.get('title') or 'Quote follow-up'}**")
+            meta_cols = st.columns(4)
+            meta_cols[0].caption(f"Due: {task.get('due_date') or '-'}")
+            meta_cols[1].caption(f"Channel: {task.get('channel') or '-'}")
+            meta_cols[2].caption(f"Status: {task.get('quotation_status') or '-'}")
+            meta_cols[3].caption(currency_display(task.get("sell_amount"), task.get("currency") or "USD"))
+
+            control_cols = st.columns([1, 1, 2])
+            channel = control_cols[0].selectbox(
+                "Channel",
+                ["Email", "WeChat", "WhatsApp"],
+                key=f"quote_fu_channel_{task['id']}",
+            )
+            next_follow_up_date = control_cols[1].date_input(
+                "Next follow-up",
+                value=datetime.today().date() + timedelta(days=3),
+                key=f"quote_fu_next_{task['id']}",
+            )
+            schedule_next = control_cols[2].checkbox(
+                "Schedule next follow-up",
+                value=True,
+                key=f"quote_fu_schedule_{task['id']}",
+            )
+
+            suggestion = build_quote_follow_up_suggestion(task, channel)
+            st.text_area(
+                "AI follow-up suggestion",
+                value=suggestion,
+                height=130,
+                key=f"quote_fu_suggestion_{task['id']}",
+            )
+
+            action_cols = st.columns(3)
+            channel_buttons = [
+                ("Email follow-up", "Email", action_cols[0]),
+                ("WeChat follow-up", "WeChat", action_cols[1]),
+                ("WhatsApp follow-up", "WhatsApp", action_cols[2]),
+            ]
+            for label_text, button_channel, button_col in channel_buttons:
+                if button_col.button(label_text, key=f"quote_fu_{button_channel.lower()}_{task['id']}"):
+                    next_date = next_follow_up_date.isoformat() if schedule_next else None
+                    complete_quote_follow_up_task(
+                        task["id"],
+                        button_channel,
+                        next_date,
+                        suggestion,
+                    )
+                    st.success(f"{button_channel} follow-up logged.")
+                    st.rerun()
+
+
 def show_dashboard():
     st.title("CRM Sales Cockpit")
     data = get_crm_dashboard_data()
@@ -1070,6 +1172,8 @@ def show_dashboard():
     backup_cols[0].metric("Last Backup", last_backup.get("timestamp", "No successful backup") if last_backup else "No successful backup")
     backup_cols[1].metric("Commit", ((last_backup.get("commit_hash", "") if last_backup else "") or "-")[:8])
     backup_cols[2].metric("Status", "Synced" if last_backup else "No backup")
+
+    show_quote_follow_up_engine()
 
     intelligence_cols = st.columns(2)
     with intelligence_cols[0]:
@@ -1574,9 +1678,10 @@ def show_admin():
             st.rerun()
 
     with st.expander("Email Settings", expanded=False):
-        email_sending_tab, email_bounce_tab, email_cleanup_tab, email_signature_tab = st.tabs(
+        email_sending_tab, email_tracking_tab, email_bounce_tab, email_cleanup_tab, email_signature_tab = st.tabs(
             [
                 "Email Sending",
+                "Email Tracking",
                 "Email Bounce Processing",
                 "Invalid / Bounced Email Cleanup",
                 "Email Signature",
@@ -1648,6 +1753,45 @@ def show_admin():
                 st.caption("Save SMTP host and from email before sending a test email.")
             elif test_email and not is_valid_email(test_email):
                 st.caption("Enter a valid test email address.")
+
+        with email_tracking_tab:
+            st.caption("Open tracking needs a public URL that email clients can reach, such as a deployed app URL or tunnel URL.")
+            tracking_base_url = st.text_input(
+                "Tracking Base URL",
+                value=get_app_setting("tracking_base_url", ""),
+                placeholder="https://your-public-app-url",
+                key="tracking_base_url_input",
+            )
+            if st.button("Save Tracking Settings", key="save_tracking_settings"):
+                set_app_setting("tracking_base_url", tracking_base_url.strip())
+                st.success("Tracking settings saved.")
+                st.rerun()
+            if tracking_base_url:
+                sample_separator = "&" if "?" in tracking_base_url else "?"
+                st.caption(f"Sample pixel URL: {tracking_base_url.rstrip('/')}{sample_separator}track_open=TRACKING_TOKEN")
+            else:
+                st.warning("Open tracking is disabled until Tracking Base URL is set.")
+
+            st.subheader("Reply Tracking")
+            reply_cols = st.columns([1, 1, 2])
+            reply_limit = reply_cols[0].selectbox("Mailbox Scan Limit", [50, 100, 200, 500], index=1, key="reply_scan_limit")
+            reply_cols[1].metric("IMAP Host", get_app_setting("imap_host", "mail.1aimlogistics.com"))
+            reply_cols[2].caption("Uses the same IMAP username/password as SMTP settings.")
+            if st.button("Process Replies", key="process_reply_emails"):
+                with st.spinner("Scanning mailbox for campaign replies..."):
+                    st.session_state.reply_processing_result = process_email_replies(reply_limit)
+            reply_result = st.session_state.get("reply_processing_result")
+            if reply_result:
+                reply_result_cols = st.columns(4)
+                reply_result_cols[0].metric("Reply Emails Scanned", reply_result.get("scanned", 0))
+                reply_result_cols[1].metric("Replies Found", reply_result.get("replies_found", 0))
+                reply_result_cols[2].metric("Messages Updated", reply_result.get("messages_updated", 0))
+                reply_result_cols[3].metric("Unmatched", len(reply_result.get("unmatched", [])))
+                if reply_result.get("unmatched"):
+                    st.caption("Unmatched reply emails")
+                    st.dataframe(pd.DataFrame({"Reply": reply_result["unmatched"]}), use_container_width=True, hide_index=True)
+                if reply_result.get("errors"):
+                    st.error(" | ".join(reply_result["errors"]))
 
         with email_bounce_tab:
             imap_cols = st.columns(4)
@@ -2520,6 +2664,153 @@ def money_display(value):
         return "$0"
 
 
+def render_save_opportunity_intelligence(opportunity):
+    with st.expander("Save as Knowledge Intelligence", expanded=False):
+        st.caption("Turn this opportunity into reusable CRM memory for future sales, quotation, or operations decisions.")
+        default_type = "Customer Intelligence"
+        if opportunity.get("stage") == "Lost":
+            default_type = "Lessons Learned"
+        elif opportunity.get("stage") == "Won":
+            default_type = "Shipment History Intelligence"
+        intel_cols = st.columns([1.5, 2.5, 1])
+        intel_type = intel_cols[0].selectbox(
+            "Intelligence Type",
+            INTELLIGENCE_TYPES,
+            index=INTELLIGENCE_TYPES.index(default_type),
+            key=f"opp_intel_type_{opportunity['id']}",
+        )
+        title = intel_cols[1].text_input(
+            "Title",
+            value=f"{opportunity.get('display_name') or 'Opportunity'} - {intel_type}",
+            key=f"opp_intel_title_{opportunity['id']}",
+        )
+        confidence = intel_cols[2].selectbox("Confidence", ["High", "Medium", "Low"], index=1, key=f"opp_intel_conf_{opportunity['id']}")
+        summary = st.text_area(
+            "Summary",
+            value=(
+                f"{opportunity.get('display_name') or 'Opportunity'} | "
+                f"{opportunity.get('organization_name') or 'No organization'} | "
+                f"Stage: {opportunity.get('stage') or '-'} | "
+                f"Lane: {opportunity.get('trade_lane') or '-'} | "
+                f"Service: {opportunity.get('service_type') or '-'}"
+            ),
+            height=90,
+            key=f"opp_intel_summary_{opportunity['id']}",
+        )
+        activity_notes = "\n".join(
+            f"- {activity.get('activity_type')}: {activity.get('description') or activity.get('summary') or ''}"
+            for activity in opportunity.get("activities", [])[:5]
+        )
+        details = st.text_area(
+            "Details / Lesson / What to remember",
+            value="\n\n".join(
+                item
+                for item in [
+                    opportunity.get("notes") or "",
+                    activity_notes,
+                ]
+                if item
+            ),
+            height=170,
+            key=f"opp_intel_details_{opportunity['id']}",
+        )
+        tags = st.text_input(
+            "Tags",
+            value=", ".join(item for item in ["opportunity", opportunity.get("stage"), opportunity.get("service_type")] if item),
+            key=f"opp_intel_tags_{opportunity['id']}",
+        )
+        if st.button("Save Opportunity Intelligence", key=f"save_opp_intel_{opportunity['id']}", disabled=not title.strip()):
+            intelligence_id = save_intelligence(
+                {
+                    "intelligence_type": intel_type,
+                    "title": title,
+                    "entity_name": opportunity.get("organization_name"),
+                    "country": "",
+                    "lane": opportunity.get("trade_lane"),
+                    "commodity": "",
+                    "hs_code": "",
+                    "summary": summary,
+                    "details": details,
+                    "source": f"Opportunity #{opportunity['id']}",
+                    "source_type": "Opportunity",
+                    "source_id": opportunity["id"],
+                    "confidence": confidence,
+                    "tags": tags,
+                    "status": "Active",
+                    "created_by": "admin",
+                }
+            )
+            st.success(f"Saved to Intelligence Library: #{intelligence_id}")
+
+
+def render_save_quotation_intelligence(quotation):
+    with st.expander("Save as Knowledge Intelligence", expanded=False):
+        st.caption("Turn this quote into reusable pricing, customer, vendor, or shipment-history memory.")
+        default_type = "Customer Intelligence" if quotation.get("customer_name") else "Lessons Learned"
+        quote_cols = st.columns([1.5, 2.5, 1])
+        intel_type = quote_cols[0].selectbox(
+            "Intelligence Type",
+            INTELLIGENCE_TYPES,
+            index=INTELLIGENCE_TYPES.index(default_type),
+            key=f"quote_intel_type_{quotation['id']}",
+        )
+        title = quote_cols[1].text_input(
+            "Title",
+            value=f"{quotation.get('quote_no') or 'Quotation'} v{quotation.get('version') or 1} - {intel_type}",
+            key=f"quote_intel_title_{quotation['id']}",
+        )
+        confidence = quote_cols[2].selectbox("Confidence", ["High", "Medium", "Low"], index=1, key=f"quote_intel_conf_{quotation['id']}")
+        item_lines = "\n".join(
+            f"- {item.get('description') or item.get('charge_name') or 'Line'}: {item.get('sell_amount') or item.get('amount') or ''}"
+            for item in quotation.get("items", [])[:10]
+        )
+        summary = st.text_area(
+            "Summary",
+            value=(
+                f"{quotation.get('customer_name') or 'Customer'} | "
+                f"{quotation.get('trade_lane') or '-'} | "
+                f"{quotation.get('service_type') or '-'} | "
+                f"Status: {quotation.get('status') or '-'} | "
+                f"Total: {currency_display(quotation.get('sell_amount'), quotation.get('currency') or 'USD')}"
+            ),
+            height=90,
+            key=f"quote_intel_summary_{quotation['id']}",
+        )
+        details = st.text_area(
+            "Details / Pricing Memory / What to remember",
+            value="\n\n".join(item for item in [quotation.get("notes") or "", item_lines] if item),
+            height=170,
+            key=f"quote_intel_details_{quotation['id']}",
+        )
+        tags = st.text_input(
+            "Tags",
+            value=", ".join(item for item in ["quotation", quotation.get("status"), quotation.get("service_type")] if item),
+            key=f"quote_intel_tags_{quotation['id']}",
+        )
+        if st.button("Save Quotation Intelligence", key=f"save_quote_intel_{quotation['id']}", disabled=not title.strip()):
+            intelligence_id = save_intelligence(
+                {
+                    "intelligence_type": intel_type,
+                    "title": title,
+                    "entity_name": quotation.get("customer_name"),
+                    "country": "",
+                    "lane": quotation.get("trade_lane"),
+                    "commodity": "",
+                    "hs_code": "",
+                    "summary": summary,
+                    "details": details,
+                    "source": f"Quotation #{quotation['id']} {quotation.get('quote_no') or ''}".strip(),
+                    "source_type": "Quotation",
+                    "source_id": quotation["id"],
+                    "confidence": confidence,
+                    "tags": tags,
+                    "status": "Active",
+                    "created_by": "admin",
+                }
+            )
+            st.success(f"Saved to Intelligence Library: #{intelligence_id}")
+
+
 def show_inquiry_intake():
     st.subheader("Inquiry Intake")
     st.caption("Parse inbound freight inquiries, save attachments, and create a reviewed opportunity.")
@@ -2747,6 +3038,8 @@ def show_opportunity_detail(opportunity_id):
         )
         st.success("Opportunity saved.")
         st.rerun()
+
+    render_save_opportunity_intelligence(opportunity)
 
     st.subheader("Activity")
     if not opportunity.get("activities"):
@@ -3159,6 +3452,8 @@ def show_quotation_detail(quotation_id):
     if save_cols[5].button("Mark Sent", key=f"sent_quote_{quotation_id}"):
         update_quotation_status(quotation_id, "Sent")
         st.rerun()
+
+    render_save_quotation_intelligence(quotation)
 
     latest_quotation = get_quotation_detail(quotation_id) or quotation
     export_cols = st.columns(2)
@@ -4554,6 +4849,81 @@ def show_case_library():
             st.write(case.get("risk_notes") or "-")
 
 
+def show_intelligence_library():
+    st.title("Intelligence Library")
+    st.caption("Store reusable business intelligence: lessons learned, market signals, vendor notes, customer know-how, and shipment history.")
+
+    with st.expander("Add Intelligence", expanded=False):
+        type_cols = st.columns([1.5, 2.5, 1, 1])
+        intelligence_type = type_cols[0].selectbox("Type", INTELLIGENCE_TYPES, key="kb_intel_type")
+        title = type_cols[1].text_input("Title", key="kb_intel_title")
+        confidence = type_cols[2].selectbox("Confidence", ["High", "Medium", "Low"], index=1, key="kb_intel_confidence")
+        status = type_cols[3].selectbox("Status", ["Active", "Draft", "Archived"], key="kb_intel_status")
+
+        meta_cols = st.columns(5)
+        entity_name = meta_cols[0].text_input("Entity", placeholder="Customer / vendor / market", key="kb_intel_entity")
+        country = meta_cols[1].text_input("Country", key="kb_intel_country")
+        lane = meta_cols[2].text_input("Lane", placeholder="China - Vietnam", key="kb_intel_lane")
+        commodity = meta_cols[3].text_input("Commodity", key="kb_intel_commodity")
+        hs_code = meta_cols[4].text_input("HS Code", key="kb_intel_hs")
+        summary = st.text_area("Summary", height=100, key="kb_intel_summary")
+        details = st.text_area("Details / Evidence / What to remember", height=180, key="kb_intel_details")
+        source_cols = st.columns([2, 2])
+        source = source_cols[0].text_input("Source", placeholder="Shipment, customer call, vendor quote, market note", key="kb_intel_source")
+        tags = source_cols[1].text_input("Tags", placeholder="China, OLO, customs, DDP", key="kb_intel_tags")
+        if st.button("Save Intelligence", type="primary", key="kb_save_intelligence", disabled=not title.strip()):
+            intelligence_id = save_intelligence(
+                {
+                    "intelligence_type": intelligence_type,
+                    "title": title,
+                    "entity_name": entity_name,
+                    "country": country,
+                    "lane": lane,
+                    "commodity": commodity,
+                    "hs_code": hs_code,
+                    "summary": summary,
+                    "details": details,
+                    "source": source,
+                    "confidence": confidence,
+                    "tags": tags,
+                    "status": status,
+                    "created_by": "admin",
+                }
+            )
+            st.success(f"Intelligence saved: #{intelligence_id}")
+            st.rerun()
+
+    search_cols = st.columns(5)
+    keyword = search_cols[0].text_input("Search Intelligence", key="kb_intel_search")
+    intelligence_type = search_cols[1].selectbox("Type", [""] + INTELLIGENCE_TYPES, key="kb_intel_type_search")
+    country = search_cols[2].text_input("Country", key="kb_intel_country_search")
+    entity_name = search_cols[3].text_input("Entity", key="kb_intel_entity_search")
+    tags = search_cols[4].text_input("Tags", key="kb_intel_tags_search")
+    rows = search_intelligence(keyword, intelligence_type, country, entity_name, tags)
+    st.caption(f"Showing {len(rows)} intelligence records")
+    if not rows:
+        st.info("No intelligence records found.")
+        return
+
+    for item in rows:
+        title = f"{item.get('intelligence_type') or 'Intelligence'} - {item.get('title') or 'Untitled'}"
+        with st.expander(title):
+            meta_cols = st.columns(5)
+            meta_cols[0].write(item.get("entity_name") or "-")
+            meta_cols[1].write(item.get("country") or "-")
+            meta_cols[2].write(item.get("lane") or "-")
+            meta_cols[3].write(item.get("commodity") or "-")
+            meta_cols[4].write(item.get("confidence") or "-")
+            st.markdown("**Summary**")
+            st.write(item.get("summary") or "-")
+            st.markdown("**Details**")
+            st.write(item.get("details") or "-")
+            source_label = item.get("source") or "-"
+            if item.get("source_type") and item.get("source_id"):
+                source_label = f"{source_label} ({item.get('source_type')} #{item.get('source_id')})"
+            st.caption(f"Source: {source_label} | Tags: {item.get('tags') or '-'}")
+
+
 def show_knowledge_ai_assistant():
     st.title("AI Assistant")
     st.caption("Evidence-only assistant. It answers from stored cases, SOPs, and legal documents. No external AI provider is used in V1.")
@@ -4583,6 +4953,15 @@ def show_knowledge_ai_assistant():
         st.dataframe(pd.DataFrame(answer["related_cases"])[["title", "customer", "commodity", "country", "solution"]], use_container_width=True, hide_index=True)
     else:
         st.write("None found.")
+    st.subheader("Relevant Intelligence")
+    if answer.get("intelligence"):
+        st.dataframe(
+            pd.DataFrame(answer["intelligence"])[["intelligence_type", "title", "entity_name", "country", "summary", "confidence"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.write("None found.")
     st.subheader("Risk Notes")
     st.write(answer["risk_notes"])
     st.subheader("Confidence Level")
@@ -4599,8 +4978,20 @@ def show_knowledge_base():
         show_sop_library()
     elif section == "Case Library":
         show_case_library()
+    elif section == "Intelligence Library":
+        show_intelligence_library()
     else:
         show_knowledge_ai_assistant()
+
+
+tracking_token = st.query_params.get("track_open")
+if tracking_token:
+    record_outreach_open(tracking_token)
+    st.markdown(
+        "<div style='width:1px;height:1px;overflow:hidden;opacity:0;'>tracked</div>",
+        unsafe_allow_html=True,
+    )
+    st.stop()
 
 
 pending_page = st.session_state.pop("pending_page", None)
@@ -4652,7 +5043,7 @@ with st.sidebar:
     if page == "Knowledge Base":
         st.radio(
             "Knowledge Base",
-            ["Legal Library", "SOP Library", "Case Library", "AI Assistant"],
+            ["Legal Library", "SOP Library", "Case Library", "Intelligence Library", "AI Assistant"],
             key="knowledge_base_page",
         )
     st.session_state.previous_parent_page = page
