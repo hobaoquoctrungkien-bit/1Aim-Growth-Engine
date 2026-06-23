@@ -2488,7 +2488,7 @@ def create_opportunity(data, user="admin"):
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """,
         (
             opportunity_name,
@@ -5085,6 +5085,77 @@ def get_opportunities():
     )
 
 
+def get_test_opportunity_candidates():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            opportunities.id,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_name,
+            COALESCE(opportunities.stage, 'Interested') AS stage,
+            COALESCE(opportunities.potential_revenue, 0) AS potential_revenue,
+            opportunities.organization_id,
+            opportunities.contact_id,
+            opportunities.created_at,
+            opportunities.updated_at
+        FROM opportunities
+        WHERE COALESCE(opportunities.potential_revenue, 0) = 0
+            AND COALESCE(opportunities.stage, 'Interested') = 'Interested'
+            AND opportunities.organization_id IS NULL
+            AND opportunities.contact_id IS NULL
+            AND (
+                LOWER(COALESCE(opportunities.opportunity_name, opportunities.title, '')) LIKE '%need rate%'
+                OR LOWER(COALESCE(opportunities.opportunity_name, opportunities.title, '')) LIKE '%nhờ%'
+                OR LOWER(COALESCE(opportunities.opportunity_name, opportunities.title, '')) LIKE '%test%'
+            )
+        ORDER BY opportunities.created_at DESC, opportunities.id DESC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def delete_test_opportunities(opportunity_ids):
+    ids = [int(item) for item in opportunity_ids or []]
+    if not ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in ids)
+    conn = get_connection()
+    cur = conn.cursor()
+    candidates = cur.execute(
+        f"""
+        SELECT id
+        FROM opportunities
+        WHERE id IN ({placeholders})
+            AND COALESCE(potential_revenue, 0) = 0
+            AND COALESCE(stage, 'Interested') = 'Interested'
+            AND organization_id IS NULL
+            AND contact_id IS NULL
+            AND (
+                LOWER(COALESCE(opportunity_name, title, '')) LIKE '%need rate%'
+                OR LOWER(COALESCE(opportunity_name, title, '')) LIKE '%nhờ%'
+                OR LOWER(COALESCE(opportunity_name, title, '')) LIKE '%test%'
+            )
+        """,
+        ids,
+    ).fetchall()
+    safe_ids = [row["id"] for row in candidates]
+    if not safe_ids:
+        conn.close()
+        return 0
+
+    safe_placeholders = ",".join("?" for _ in safe_ids)
+    cur.execute(f"DELETE FROM tasks WHERE opportunity_id IN ({safe_placeholders})", safe_ids)
+    cur.execute(f"DELETE FROM activities WHERE opportunity_id IN ({safe_placeholders})", safe_ids)
+    cur.execute(f"DELETE FROM vendor_rates WHERE opportunity_id IN ({safe_placeholders})", safe_ids)
+    cur.execute(f"DELETE FROM opportunities WHERE id IN ({safe_placeholders})", safe_ids)
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
 def get_opportunity_detail(opportunity_id):
     conn = get_connection()
     row = conn.execute(
@@ -5129,6 +5200,9 @@ def get_opportunity_detail(opportunity_id):
 
 
 def save_opportunity(record, opportunity_id=None, user="admin"):
+    if not opportunity_id:
+        return create_opportunity(record, user=user)["opportunity_id"]
+
     conn = get_connection()
     cur = conn.cursor()
     stage = normalize_opportunity_stage(record.get("stage"))
@@ -5155,6 +5229,18 @@ def save_opportunity(record, opportunity_id=None, user="admin"):
                 status = ?,
                 trade_lane = ?,
                 service_type = ?,
+                route = ?,
+                commodity = ?,
+                volume = ?,
+                cargo_description = ?,
+                origin = ?,
+                destination = ?,
+                weight = ?,
+                container_type = ?,
+                quantity = ?,
+                incoterm = ?,
+                quotation_status = ?,
+                mode = ?,
                 potential_revenue = ?,
                 potential_profit = ?,
                 expected_close_date = ?,
@@ -5174,6 +5260,18 @@ def save_opportunity(record, opportunity_id=None, user="admin"):
                 status,
                 record.get("trade_lane"),
                 record.get("service_type"),
+                record.get("trade_lane") or build_route(record.get("origin"), record.get("destination")),
+                record.get("commodity") or record.get("cargo_description"),
+                record.get("volume"),
+                record.get("cargo_description") or record.get("commodity"),
+                record.get("origin"),
+                record.get("destination"),
+                record.get("weight"),
+                record.get("container_type"),
+                record.get("quantity"),
+                record.get("incoterm"),
+                record.get("quotation_status") or "Not Started",
+                record.get("mode"),
                 parse_money(record.get("potential_revenue")),
                 parse_money(record.get("potential_profit")),
                 record.get("expected_close_date"),
@@ -5185,50 +5283,6 @@ def save_opportunity(record, opportunity_id=None, user="admin"):
         )
         saved_id = opportunity_id
         description = f"Opportunity updated: {opportunity_name}"
-    else:
-        cur.execute(
-            """
-            INSERT INTO opportunities (
-                opportunity_name,
-                title,
-                organization_id,
-                contact_id,
-                owner,
-                stage,
-                status,
-                trade_lane,
-                service_type,
-                potential_revenue,
-                potential_profit,
-                expected_close_date,
-                next_action,
-                next_action_date,
-                notes,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            (
-                opportunity_name,
-                opportunity_name,
-                record.get("organization_id"),
-                record.get("contact_id"),
-                record.get("owner"),
-                stage,
-                status,
-                record.get("trade_lane"),
-                record.get("service_type"),
-                parse_money(record.get("potential_revenue")),
-                parse_money(record.get("potential_profit")),
-                record.get("expected_close_date"),
-                record.get("next_action"),
-                record.get("next_action_date"),
-                record.get("notes"),
-            ),
-        )
-        saved_id = cur.lastrowid
-        description = f"Opportunity created: {opportunity_name}"
 
     log_crm_activity(
         cur,

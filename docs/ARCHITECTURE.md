@@ -58,7 +58,7 @@ Contacts also include `email_status` for delivery hygiene:
 
 Leads include organization/contact links, source/campaign, lead status, priority score, action score, next action, and next action date.
 
-Opportunities include opportunity name, organization/contact links, owner, stage, trade lane, service type, potential revenue, potential profit, expected close date, next action, next action date, and notes.
+Opportunities include opportunity name, organization/contact links, owner, stage, trade lane, service type, cargo description, origin, destination, volume, weight, container type, quantity, incoterm, quotation status, potential revenue, potential profit, expected close date, next action, next action date, and notes.
 
 Outreach campaigns store campaign metadata in `outreach_campaigns` and per-contact message records in `outreach_messages`.
 
@@ -197,6 +197,7 @@ Tables:
 Service layer:
 
 - `knowledge_service.py`
+- `document_parser_service.py`
 
 Functions:
 
@@ -204,8 +205,12 @@ Functions:
 - `search_cases()`
 - `search_sops()`
 - `search_intelligence()`
-- `extract_uploaded_text()`
-- `parse_legal_document_text()`
+- `document_parser_service.extract_text()`
+- `document_parser_service.parse_document()`
+- `document_parser_service.parse_with_ai()`
+- `document_parser_service.suggest_tags()`
+- `document_parser_service.generate_summary()`
+- `document_parser_service.extract_key_clauses()`
 - `save_intelligence()`
 - `retrieve_context()`
 - `generate_answer()`
@@ -222,11 +227,21 @@ Future vector/RAG readiness:
 Uploads:
 
 - Legal Library can store PDF, DOCX, and TXT files under `data/knowledge_uploads/`.
-- TXT, PDF, and DOCX uploads can be extracted and parsed before saving.
+- TXT, PDF, DOCX, and pasted text can be extracted and parsed before saving.
 - PDF extraction uses PyMuPDF when available and falls back to `pypdf`.
 - DOCX extraction uses `python-docx`.
-- The Legal Library upload flow has four steps: upload file, extract and auto-fill, review parsed information, approve key clauses, then save.
-- Vietnamese legal parser rules detect document number, document type, issuing authority, issue/effective dates, expiry/replacement phrases, category, tags, summary, and likely key clauses.
+- The upload flow is `Upload -> Extract Text -> AI Parse -> Parsed Information Preview -> User Review -> Save`.
+- `parse_with_ai()` is the provider abstraction for future OpenAI, Gemini, Claude, or local LLM integrations.
+- Parser providers implement the `AIParserProvider` interface.
+- Implemented providers:
+  - `RegexParserProvider`
+  - `OpenAIParserProvider` stub
+  - `GeminiParserProvider` stub
+- Provider selection can use Admin System Settings or environment variables.
+- When OpenAI or Gemini is configured, the system attempts that provider first. If the provider is unavailable or fails, it falls back to `RegexParserProvider`.
+- V1 does not hardcode external AI calls. Regex parsing is sufficient fallback only; future accuracy should come from AI providers, not expanding regex rules.
+- The central parser classifies LAW, DECREE, CIRCULAR, OFFICIAL LETTER, SOP, CASE, INQUIRY, COMMERCIAL INVOICE, PACKING LIST, DATASHEET, PERMIT, BOOKING, SHIPMENT DOCUMENT, and OTHER.
+- The parser extracts legal metadata, SOP fields, case fields, logistics document fields, tags, summaries, key clauses, compliance topics, possible SOP matches, and possible case matches.
 
 Intelligence Library:
 
@@ -434,7 +449,7 @@ Reason:
 The Opportunities page contains:
 
 - Opportunity dashboard KPIs
-- Inquiry Intake workflow for creating reviewed inbound opportunities
+- Create Opportunity workflow with `Parse Inquiry` and `Manual Entry` tabs
 - Revenue KPIs
 - Opportunity list
 - Opportunity detail
@@ -442,6 +457,12 @@ The Opportunities page contains:
 - Manual opportunity creation from Lead Detail
 
 Lead Detail can create an opportunity directly from the current lead context.
+
+Opportunity creation uses one shared database function:
+
+- `create_opportunity(data)`
+
+Both Parse Inquiry and Manual Entry call the same function so opportunity records are saved through one path. Existing opportunity edits continue through `save_opportunity()`, which updates the same `opportunities` table.
 
 ## Pricing Engine
 
@@ -495,14 +516,14 @@ Approval:
 
 ## Inquiry Intake
 
-Inquiry Intake lives inside the Opportunities page and turns inbound freight emails into reviewed opportunities.
+Inquiry Intake lives inside the Opportunities page under `Create Opportunity > Parse Inquiry` and turns inbound freight emails into reviewed opportunities.
 
 The page supports:
 
 - Pasted inquiry email text
 - Multiple uploaded attachments
 - Text extraction from TXT, EML, CSV, PDF, DOCX, XLS, and XLSX attachments
-- Rule-based inquiry extraction for sender, email, company, trade lane, service type, mode, commodity, volume, and next action
+- Rule-based inquiry extraction for opportunity name, organization, contact, trade lane, service type, cargo description, origin, destination, volume, weight, container type, quantity, incoterm, deadline/date information, and next action
 - Human review and edit before saving
 - Automatic file folder creation under `data/inquiries/`
 - Automatic attachment saving into the inquiry folder
@@ -511,6 +532,8 @@ The page supports:
 - Inquiry activity logging using the existing `activities` table
 
 Inquiry Intake does not create a separate inquiry table in V1. The reviewed inquiry is stored as an opportunity with `stage = Quote Requested`, source text in `inquiry_text`, and saved file references in opportunity notes and activity history.
+
+Admin includes `Clean Test Opportunities`, which previews strict test-like opportunity candidates before deletion. It only targets records with zero revenue, stage `Interested`, no linked organization/contact, and test-like names such as `Need rate`, `Nhờ`, or `test`. Deletion requires typed confirmation and rechecks the criteria in the database layer.
 
 ## Documentation Policy
 

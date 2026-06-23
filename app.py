@@ -15,11 +15,14 @@ import database as database_module
 database_module = importlib.reload(database_module)
 
 from ui_helpers import status_badge_html
+from document_parser_service import extract_text as extract_document_text, parse_document
 from database import (
     apply_pricing_summary_to_opportunity,
     calculate_suggested_sell_rate,
+    create_opportunity,
     create_inquiry,
     create_inquiry_opportunity,
+    delete_test_opportunities,
     find_captured_crm_duplicates,
     get_app_setting,
     get_backup_history,
@@ -36,6 +39,7 @@ from database import (
     get_opportunities,
     get_opportunity_dashboard_data,
     get_opportunity_detail,
+    get_test_opportunity_candidates,
     get_open_tasks,
     get_outreach_campaign_metrics,
     get_outreach_campaign_templates,
@@ -107,9 +111,7 @@ from inquiry_intake import (
 from typography import DEFAULT_UI_SCALE, UI_SCALE_OPTIONS, get_typography_tokens
 from knowledge_service import (
     INTELLIGENCE_TYPES,
-    extract_uploaded_text,
     generate_answer,
-    parse_legal_document_text,
     save_case,
     save_document,
     save_intelligence,
@@ -1587,6 +1589,28 @@ def show_admin():
         if status["latest_backup_name"]:
             st.caption(f"Latest backup: {status['latest_backup_name']}")
 
+    with st.expander("Clean Test Opportunities", expanded=False):
+        st.caption("Preview only obvious test opportunities before deletion. Deletion requires typed confirmation.")
+        candidates = get_test_opportunity_candidates()
+        if not candidates:
+            st.info("No obvious test opportunities found.")
+        else:
+            st.warning(f"{len(candidates)} test-like opportunities match the cleanup rule.")
+            st.dataframe(pd.DataFrame(candidates), use_container_width=True, hide_index=True)
+            confirm_text = st.text_input(
+                "Type CLEAN TEST OPPORTUNITIES to delete the previewed records",
+                key="clean_test_opportunities_confirm",
+            )
+            if st.button(
+                "Clean Test Opportunities",
+                type="primary",
+                disabled=confirm_text != "CLEAN TEST OPPORTUNITIES",
+                key="clean_test_opportunities_button",
+            ):
+                deleted = delete_test_opportunities([row["id"] for row in candidates])
+                st.success(f"Deleted {deleted} test opportunities.")
+                st.rerun()
+
     with st.expander("Git Status", expanded=False):
         git_health = get_git_health()
         if st.button("Refresh Git Status", key="refresh_git_status"):
@@ -1670,8 +1694,28 @@ def show_admin():
             key="admin_ui_scale",
             index=UI_SCALE_OPTIONS.index(st.session_state.ui_scale),
         )
+        st.subheader("Document Parser")
+        parser_provider_options = ["Auto", "Regex", "OpenAI", "Gemini"]
+        current_parser_provider = get_app_setting("document_parser_provider", "Auto")
+        parser_provider = st.selectbox(
+            "Parser Provider",
+            parser_provider_options,
+            index=parser_provider_options.index(current_parser_provider) if current_parser_provider in parser_provider_options else 0,
+            key="admin_document_parser_provider",
+        )
+        parser_cols = st.columns(2)
+        openai_model = parser_cols[0].text_input("OpenAI Parser Model", value=get_app_setting("openai_parser_model", "gpt-4.1-mini"))
+        gemini_model = parser_cols[1].text_input("Gemini Parser Model", value=get_app_setting("gemini_parser_model", "gemini-1.5-pro"))
+        key_cols = st.columns(2)
+        openai_key = key_cols[0].text_input("OpenAI API Key", value=get_app_setting("openai_api_key", ""), type="password")
+        gemini_key = key_cols[1].text_input("Gemini API Key", value=get_app_setting("gemini_api_key", ""), type="password")
         if st.button("Save System Settings", key="save_system_settings"):
             set_app_setting("ui_scale", selected_ui_scale)
+            set_app_setting("document_parser_provider", parser_provider)
+            set_app_setting("openai_parser_model", openai_model)
+            set_app_setting("gemini_parser_model", gemini_model)
+            set_app_setting("openai_api_key", openai_key)
+            set_app_setting("gemini_api_key", gemini_key)
             st.session_state.ui_scale = selected_ui_scale
             st.session_state.persisted_ui_scale = selected_ui_scale
             st.success("System settings saved.")
@@ -2812,25 +2856,45 @@ def render_save_quotation_intelligence(quotation):
 
 
 def show_inquiry_intake():
-    st.subheader("Inquiry Intake")
     st.caption("Parse inbound freight inquiries, save attachments, and create a reviewed opportunity.")
 
+    leads = get_leads()
+    lead_options = {"No linked lead": None}
+    for lead in leads:
+        label = (
+            f"#{lead['id']} - "
+            f"{lead['company_name'] or 'No organization'} - "
+            f"{lead['contact_person'] or 'No contact'}"
+        )
+        lead_options[label] = lead
+
     raw_email = st.text_area(
-        "Inquiry Email",
+        "Paste customer inquiry",
         key="inquiry_raw_email",
-        height=260,
+        height=320,
         placeholder="Paste the customer or agent inquiry email here.",
     )
-    uploaded_files = st.file_uploader(
-        "Attachments",
-        type=["pdf", "docx", "txt", "csv", "eml", "xlsx", "xls", "png", "jpg", "jpeg"],
-        accept_multiple_files=True,
-        key="inquiry_attachments",
-        help="Text is extracted from PDF, DOCX, TXT, CSV, and EML files. All uploaded files are saved with the inquiry.",
+    option_cols = st.columns(3)
+    selected_label = option_cols[0].selectbox("Linked Lead", list(lead_options.keys()), key="inquiry_linked_lead")
+    linked_lead = lead_options[selected_label]
+    customer_email = option_cols[1].text_input(
+        "Customer Email",
+        value=linked_lead.get("email") if linked_lead else "",
+        key="inquiry_customer_email",
     )
+    inquiry_notes = option_cols[2].text_input("Notes", key="inquiry_notes")
+
+    with st.expander("Attachments", expanded=False):
+        uploaded_files = st.file_uploader(
+            "Upload supporting files",
+            type=["pdf", "docx", "txt", "csv", "eml", "xlsx", "xls", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key="inquiry_attachments",
+            help="Text is extracted from PDF, DOCX, TXT, CSV, Excel, and EML files. All uploaded files are saved with the inquiry.",
+        )
 
     parse_disabled = not raw_email.strip() and not uploaded_files
-    if st.button("Extract Inquiry", type="primary", disabled=parse_disabled, key="extract_inquiry"):
+    if st.button("Parse Inquiry", type="primary", disabled=parse_disabled, key="extract_inquiry"):
         attachment_items = []
         attachment_texts = []
         for uploaded_file in uploaded_files or []:
@@ -2841,39 +2905,54 @@ def show_inquiry_intake():
                 attachment_texts.append({"filename": uploaded_file.name, "text": attachment_text})
         st.session_state.inquiry_attachment_items = attachment_items
         st.session_state.inquiry_parsed = parse_inquiry_text(raw_email, attachment_texts)
+        if linked_lead:
+            st.session_state.inquiry_parsed["lead_id"] = linked_lead["id"]
+            st.session_state.inquiry_parsed["company_name"] = linked_lead.get("company_name") or st.session_state.inquiry_parsed.get("company_name")
+            st.session_state.inquiry_parsed["organization"] = linked_lead.get("company_name") or st.session_state.inquiry_parsed.get("organization")
+            st.session_state.inquiry_parsed["contact_person"] = linked_lead.get("contact_person") or st.session_state.inquiry_parsed.get("contact_person")
+        if customer_email:
+            st.session_state.inquiry_parsed["email"] = customer_email
+        if inquiry_notes:
+            st.session_state.inquiry_parsed["user_notes"] = inquiry_notes
         st.success("Inquiry fields extracted. Review before saving.")
 
     parsed = st.session_state.get("inquiry_parsed")
     if not parsed:
-        st.info("Paste an inquiry email or upload attachments, then extract the inquiry.")
+        st.info("Paste an inquiry email or upload attachments, then parse the inquiry.")
         return
 
     st.subheader("Review Extracted Inquiry")
     identity_cols = st.columns(3)
-    company_name = identity_cols[0].text_input("Organization", value=parsed.get("company_name") or "", key="inquiry_company")
+    organization = identity_cols[0].text_input("Organization", value=parsed.get("organization") or parsed.get("company_name") or "", key="inquiry_company")
     contact_person = identity_cols[1].text_input("Contact", value=parsed.get("contact_person") or "", key="inquiry_contact")
     email = identity_cols[2].text_input("Email", value=parsed.get("email") or "", key="inquiry_email")
-
-    location_cols = st.columns(3)
-    phone = location_cols[0].text_input("Phone", value=parsed.get("phone") or "", key="inquiry_phone")
-    country = location_cols[1].text_input("Country", value=parsed.get("country") or "", key="inquiry_country")
-    city = location_cols[2].text_input("City", value=parsed.get("city") or "", key="inquiry_city")
 
     opportunity_name = st.text_input(
         "Opportunity Name",
         value=parsed.get("opportunity_name") or "Inbound Inquiry",
         key="inquiry_opportunity_name",
     )
-    freight_cols = st.columns(4)
-    trade_lane = freight_cols[0].text_input("Trade Lane", value=parsed.get("trade_lane") or "", key="inquiry_lane")
-    service_type = freight_cols[1].text_input("Service Type", value=parsed.get("service_type") or "", key="inquiry_service")
-    mode = freight_cols[2].text_input("Mode", value=parsed.get("mode") or "", key="inquiry_mode")
-    volume = freight_cols[3].text_input("Volume", value=parsed.get("volume") or "", key="inquiry_volume")
+    route_cols = st.columns(3)
+    origin = route_cols[0].text_input("Origin", value=parsed.get("origin") or "", key="inquiry_origin")
+    destination = route_cols[1].text_input("Destination", value=parsed.get("destination") or "", key="inquiry_destination")
+    trade_lane = route_cols[2].text_input("Trade Lane", value=parsed.get("trade_lane") or "", key="inquiry_lane")
 
-    detail_cols = st.columns(3)
-    commodity = detail_cols[0].text_input("Commodity", value=parsed.get("commodity") or "", key="inquiry_commodity")
-    next_action = detail_cols[1].text_input("Next Action", value=parsed.get("next_action") or "Prepare quotation", key="inquiry_next_action")
-    next_action_date = detail_cols[2].text_input("Next Action Date", value=parsed.get("next_action_date") or "", key="inquiry_next_action_date")
+    freight_cols = st.columns(4)
+    service_type = freight_cols[0].text_input("Service Type", value=parsed.get("service_type") or "", key="inquiry_service")
+    cargo_description = freight_cols[1].text_input("Cargo Description", value=parsed.get("cargo_description") or parsed.get("commodity") or "", key="inquiry_cargo")
+    incoterm = freight_cols[2].text_input("Incoterm", value=parsed.get("incoterm") or "", key="inquiry_incoterm")
+    deadline = freight_cols[3].text_input("Deadline / Date Info", value=parsed.get("deadline") or "", key="inquiry_deadline")
+
+    cargo_cols = st.columns(4)
+    volume = cargo_cols[0].text_input("Volume", value=parsed.get("volume") or "", key="inquiry_volume")
+    weight = cargo_cols[1].text_input("Weight", value=parsed.get("weight") or "", key="inquiry_weight")
+    container_type = cargo_cols[2].text_input("Container Type", value=parsed.get("container_type") or "", key="inquiry_container_type")
+    quantity = cargo_cols[3].text_input("Quantity", value=parsed.get("quantity") or "", key="inquiry_quantity")
+
+    next_cols = st.columns(3)
+    next_action = next_cols[0].text_input("Next Action", value=parsed.get("next_action") or "Prepare quotation", key="inquiry_next_action")
+    next_action_date = next_cols[1].text_input("Next Action Date", value=parsed.get("next_action_date") or "", key="inquiry_next_action_date")
+    quotation_status = next_cols[2].text_input("Quotation Status", value=parsed.get("quotation_status") or "Not Started", key="inquiry_quotation_status")
 
     with st.expander("Parsed Source Text", expanded=False):
         st.text_area("Original Email", value=parsed.get("raw_text") or "", height=180, key="inquiry_review_raw_text")
@@ -2881,34 +2960,46 @@ def show_inquiry_intake():
             st.text_area("Attachment Text", value=parsed.get("attachment_text") or "", height=180, key="inquiry_review_attachment_text")
 
     save_disabled = not opportunity_name.strip()
-    if st.button("Create Opportunity From Inquiry", type="primary", disabled=save_disabled, key="save_inquiry_opportunity"):
+    if st.button("Create Opportunity from Parsed Data", type="primary", disabled=save_disabled, key="save_inquiry_opportunity"):
         attachment_items = st.session_state.get("inquiry_attachment_items", [])
         attachment_folder, saved_files = save_inquiry_files(opportunity_name, attachment_items)
         reviewed_record = {
             "opportunity_name": opportunity_name,
             "subject": parsed.get("subject"),
-            "company_name": company_name,
+            "lead_id": parsed.get("lead_id"),
+            "company_name": organization,
+            "organization": organization,
             "contact_person": contact_person,
             "email": email,
-            "phone": phone,
-            "country": country,
-            "city": city,
+            "phone": parsed.get("phone"),
+            "country": parsed.get("country"),
+            "city": parsed.get("city"),
             "trade_lane": trade_lane,
             "service_type": service_type,
-            "mode": mode,
+            "cargo_description": cargo_description,
+            "commodity": cargo_description,
+            "origin": origin,
+            "destination": destination,
             "volume": volume,
-            "commodity": commodity,
+            "weight": weight,
+            "container_type": container_type,
+            "quantity": quantity,
+            "incoterm": incoterm,
+            "deadline": deadline,
+            "quotation_status": quotation_status,
             "stage": "Quote Requested",
             "inquiry_date": parsed.get("inquiry_date"),
             "next_action": next_action,
             "next_action_date": next_action_date,
+            "create_prepare_quote_task": "1",
+            "user_notes": parsed.get("user_notes"),
             "raw_text": parsed.get("raw_text"),
             "attachment_text": parsed.get("attachment_text"),
             "attachment_folder": attachment_folder,
             "attachment_files": "\n".join(saved_files),
         }
         reviewed_record["notes"] = build_inquiry_notes(reviewed_record, saved_files)
-        result = create_inquiry_opportunity(reviewed_record)
+        result = create_opportunity(reviewed_record)
         st.session_state.selected_opportunity_id = result["opportunity_id"]
         st.session_state.inquiry_last_result = result
         st.session_state.pop("inquiry_parsed", None)
@@ -2935,7 +3026,78 @@ def show_opportunities():
     revenue_cols[1].metric("Negotiation Value", money_display(dashboard["negotiation_value"]))
     revenue_cols[2].metric("Won Value", money_display(dashboard["won_value"]))
 
-    show_inquiry_intake()
+    st.subheader("Create Opportunity")
+    parse_tab, manual_tab = st.tabs(["Parse Inquiry", "Manual Entry"])
+    with parse_tab:
+        show_inquiry_intake()
+    with manual_tab:
+        leads = get_leads()
+        lead_options = {"No linked lead": None}
+        for lead in leads:
+            label = (
+                f"#{lead['id']} - "
+                f"{lead['company_name'] or 'No organization'} - "
+                f"{lead['contact_person'] or 'No contact'}"
+            )
+            lead_options[label] = lead
+
+        selected_label = st.selectbox("Link to Lead", list(lead_options.keys()), key="new_opp_lead")
+        selected_lead = lead_options[selected_label]
+        default_name = ""
+        if selected_lead:
+            default_name = f"{selected_lead['company_name'] or 'Opportunity'} - {selected_lead['contact_person'] or 'Freight opportunity'}"
+        opportunity_name = st.text_input("Opportunity Name", value=default_name, key="new_opp_name")
+        create_cols = st.columns(3)
+        stage = create_cols[0].selectbox("Stage", OPPORTUNITY_STAGES, key="new_opp_stage")
+        trade_lane = create_cols[1].text_input("Trade Lane", key="new_opp_lane")
+        service_type = create_cols[2].text_input("Service Type", key="new_opp_service")
+        cargo_cols = st.columns(4)
+        cargo_description = cargo_cols[0].text_input("Cargo Description", key="new_opp_cargo")
+        origin = cargo_cols[1].text_input("Origin", key="new_opp_origin")
+        destination = cargo_cols[2].text_input("Destination", key="new_opp_destination")
+        incoterm = cargo_cols[3].text_input("Incoterm", key="new_opp_incoterm")
+        qty_cols = st.columns(4)
+        volume = qty_cols[0].text_input("Volume", key="new_opp_volume")
+        weight = qty_cols[1].text_input("Weight", key="new_opp_weight")
+        container_type = qty_cols[2].text_input("Container Type", key="new_opp_container")
+        quantity = qty_cols[3].text_input("Quantity", key="new_opp_quantity")
+        value_cols = st.columns(4)
+        potential_revenue = value_cols[0].text_input("Potential Revenue", key="new_opp_revenue")
+        potential_profit = value_cols[1].text_input("Potential Profit", key="new_opp_profit")
+        expected_close_date = value_cols[2].text_input("Expected Close Date", placeholder="YYYY-MM-DD", key="new_opp_close")
+        next_action_date = value_cols[3].text_input("Next Action Date", placeholder="YYYY-MM-DD", key="new_opp_next_date")
+        next_action = st.text_input("Next Action", key="new_opp_next_action")
+        notes = st.text_area("Notes", key="new_opp_notes")
+        if st.button("Create Opportunity", type="primary", key="create_opportunity"):
+            result = create_opportunity(
+                {
+                    "opportunity_name": opportunity_name,
+                    "lead_id": selected_lead["id"] if selected_lead else None,
+                    "organization_id": selected_lead["organization_id"] if selected_lead else None,
+                    "contact_id": selected_lead["contact_id"] if selected_lead else None,
+                    "owner": None,
+                    "stage": stage,
+                    "trade_lane": trade_lane,
+                    "service_type": service_type,
+                    "cargo_description": cargo_description,
+                    "origin": origin,
+                    "destination": destination,
+                    "volume": volume,
+                    "weight": weight,
+                    "container_type": container_type,
+                    "quantity": quantity,
+                    "incoterm": incoterm,
+                    "quotation_status": "Not Started",
+                    "potential_revenue": potential_revenue,
+                    "potential_profit": potential_profit,
+                    "expected_close_date": expected_close_date,
+                    "next_action": next_action,
+                    "next_action_date": next_action_date,
+                    "notes": notes,
+                }
+            )
+            st.session_state.selected_opportunity_id = result["opportunity_id"]
+            st.rerun()
 
     opportunities = get_opportunities()
     st.subheader("Opportunity List")
@@ -3009,6 +3171,16 @@ def show_opportunity_detail(opportunity_id):
     )
     trade_lane = field_cols[1].text_input("Trade Lane", value=opportunity.get("trade_lane") or "")
     service_type = field_cols[2].text_input("Service Type", value=opportunity.get("service_type") or "")
+    cargo_cols = st.columns(4)
+    cargo_description = cargo_cols[0].text_input("Cargo Description", value=opportunity.get("cargo_description") or opportunity.get("commodity") or "")
+    origin = cargo_cols[1].text_input("Origin", value=opportunity.get("origin") or "")
+    destination = cargo_cols[2].text_input("Destination", value=opportunity.get("destination") or "")
+    incoterm = cargo_cols[3].text_input("Incoterm", value=opportunity.get("incoterm") or "")
+    qty_cols = st.columns(4)
+    volume = qty_cols[0].text_input("Volume", value=opportunity.get("volume") or "")
+    weight = qty_cols[1].text_input("Weight", value=opportunity.get("weight") or "")
+    container_type = qty_cols[2].text_input("Container Type", value=opportunity.get("container_type") or "")
+    quantity = qty_cols[3].text_input("Quantity", value=opportunity.get("quantity") or "")
     value_cols = st.columns(4)
     potential_revenue = value_cols[0].text_input("Potential Revenue", value=str(opportunity.get("potential_revenue") or ""))
     potential_profit = value_cols[1].text_input("Potential Profit", value=str(opportunity.get("potential_profit") or ""))
@@ -3027,6 +3199,15 @@ def show_opportunity_detail(opportunity_id):
                 "stage": stage,
                 "trade_lane": trade_lane,
                 "service_type": service_type,
+                "cargo_description": cargo_description,
+                "origin": origin,
+                "destination": destination,
+                "volume": volume,
+                "weight": weight,
+                "container_type": container_type,
+                "quantity": quantity,
+                "incoterm": incoterm,
+                "quotation_status": opportunity.get("quotation_status") or "Not Started",
                 "potential_revenue": potential_revenue,
                 "potential_profit": potential_profit,
                 "expected_close_date": expected_close_date,
@@ -4586,13 +4767,24 @@ def show_legal_library():
         st.subheader("Step 1: Upload file")
         uploaded_file = st.file_uploader("Upload PDF, DOCX, or TXT", type=["pdf", "docx", "txt"], key="kb_legal_upload")
 
-        parse_cols = st.columns([1, 1, 4])
-        if parse_cols[0].button("Extract & Auto-fill", key="kb_extract_doc", disabled=not uploaded_file):
+        parse_cols = st.columns([1, 1, 1, 3])
+        if parse_cols[0].button("Extract Text", key="kb_extract_text", disabled=not uploaded_file):
             try:
-                uploaded_text = extract_uploaded_text(uploaded_file)
-                parsed = parse_legal_document_text(uploaded_text, uploaded_file.name)
+                uploaded_text = extract_document_text(uploaded_file)
+                st.session_state.kb_doc_extracted_text = uploaded_text
+                st.session_state.kb_doc_extract_error = ""
+                st.success("Text extracted. Review or run AI Parse.")
+            except Exception as exc:
+                st.session_state.kb_doc_extract_error = str(exc)
+                st.error(f"Text extraction failed: {exc}")
+            st.rerun()
+
+        extracted_text = st.session_state.get("kb_doc_extracted_text", "")
+        if parse_cols[1].button("AI Parse", key="kb_ai_parse_doc", disabled=not extracted_text.strip()):
+            try:
+                parsed = parse_document(extracted_text, uploaded_file.name if uploaded_file else "")
                 st.session_state.kb_doc_parsed = parsed
-                st.session_state.kb_doc_chunks = parsed.get("chunks", [])
+                st.session_state.kb_doc_chunks = parsed.get("key_clauses", [])
                 st.session_state.kb_doc_title = parsed.get("title", "")
                 st.session_state.kb_doc_no = parsed.get("document_no", "")
                 st.session_state.kb_doc_type = parsed.get("document_type", "Other")
@@ -4605,18 +4797,19 @@ def show_legal_library():
                 st.session_state.kb_doc_source = parsed.get("source_url", "")
                 st.session_state.kb_doc_tags = ", ".join(parsed.get("tags", []))
                 st.session_state.kb_doc_summary = parsed.get("summary", "")
-                st.session_state.kb_doc_chunk = parsed.get("content", "")
-                st.session_state.kb_doc_article = parsed.get("article_no", "")
-                st.session_state.kb_doc_clause = parsed.get("clause_no", "")
-                st.session_state.kb_doc_keywords = parsed.get("keywords", "")
+                st.session_state.kb_doc_chunk = parsed.get("raw_text", "")
+                first_clause = (parsed.get("key_clauses") or [{}])[0]
+                st.session_state.kb_doc_article = first_clause.get("article_no", "")
+                st.session_state.kb_doc_clause = first_clause.get("clause_no", "")
+                st.session_state.kb_doc_keywords = ", ".join(parsed.get("keywords", []))
                 st.session_state.kb_doc_extract_error = ""
                 st.success("Parsed information is ready for review.")
             except Exception as exc:
                 st.session_state.kb_doc_extract_error = str(exc)
-                st.error(f"Extraction failed: {exc}")
+                st.error(f"AI parsing failed: {exc}")
             st.rerun()
 
-        if parse_cols[1].button("Clear Draft", key="kb_clear_doc_draft"):
+        if parse_cols[2].button("Clear Draft", key="kb_clear_doc_draft"):
             for key in list(st.session_state.keys()):
                 if key.startswith("kb_doc_"):
                     del st.session_state[key]
@@ -4625,12 +4818,42 @@ def show_legal_library():
         if st.session_state.get("kb_doc_extract_error"):
             st.warning(st.session_state.kb_doc_extract_error)
 
+        if extracted_text:
+            with st.expander("Extracted Text Preview", expanded=False):
+                st.text_area("Extracted Text", value=extracted_text, height=220, key="kb_extracted_text_preview")
+
+        parsed_doc = st.session_state.get("kb_doc_parsed") or {}
+        if parsed_doc:
+            parse_status_cols = st.columns(3)
+            parse_status_cols[0].metric("Parser", parsed_doc.get("parser_engine") or "-")
+            parse_status_cols[1].metric("Confidence", parsed_doc.get("confidence_score") or "Low")
+            parse_status_cols[2].caption(parsed_doc.get("parser_error") or "")
+
         st.subheader("Step 2: Parsed Information Preview")
         st.caption("Review and edit the extracted metadata before saving. Manual entry still works without upload.")
         form_cols = st.columns(3)
         title = form_cols[0].text_input("Title", key="kb_doc_title")
         document_no = form_cols[1].text_input("Document No.", key="kb_doc_no")
         document_type_options = ["Luật", "Nghị định", "Thông tư", "Quyết định", "Công văn", "Official Letter", "Law", "Decree", "Circular", "Other"]
+        document_type_options = list(dict.fromkeys(
+            [
+                "LAW",
+                "DECREE",
+                "CIRCULAR",
+                "OFFICIAL LETTER",
+                "SOP",
+                "CASE",
+                "INQUIRY",
+                "COMMERCIAL INVOICE",
+                "PACKING LIST",
+                "DATASHEET",
+                "PERMIT",
+                "BOOKING",
+                "SHIPMENT DOCUMENT",
+                "OTHER",
+            ]
+            + document_type_options
+        ))
         if st.session_state.get("kb_doc_type") not in document_type_options:
             st.session_state.kb_doc_type = "Other"
         document_type = form_cols[2].selectbox(
@@ -4649,6 +4872,19 @@ def show_legal_library():
         source_url = meta_cols2[2].text_input("Source URL", key="kb_doc_source")
         tags = st.text_input("Tags", placeholder="customs, civil cryptography, DDP", key="kb_doc_tags")
         summary = st.text_area("Summary", height=120, key="kb_doc_summary")
+        if parsed_doc.get("field_confidence"):
+            with st.expander("Field Confidence", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Field": field, "Confidence": level}
+                            for field, level in parsed_doc.get("field_confidence", {}).items()
+                            if field
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         fallback_chunk_content = st.text_area(
             "Content / Key Clauses",
             height=220,

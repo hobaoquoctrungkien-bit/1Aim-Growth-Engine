@@ -44,13 +44,15 @@ Inbound freight inquiries should become reviewed opportunities, not separate CRM
 
 Inquiry Intake workflow:
 
-1. Paste the inquiry email and upload any customer attachments.
-2. Extract sender, company, contact, route, service, commodity, volume, and quote-preparation action.
-3. Let the user review and correct extracted fields before saving.
-4. Save uploaded files into a dated folder under `data/inquiries/`.
-5. Create an opportunity with `stage = Quote Requested`.
-6. Create an open `prepare_quote` task due on the reviewed next action date.
-7. Log an `Inquiry Received` activity with the opportunity, contact, organization, and saved file references.
+1. Open Opportunities and use `Create Opportunity`.
+2. Use `Parse Inquiry` for pasted inquiry text or `Manual Entry` for direct entry.
+3. Paste the inquiry email and upload any customer attachments when parsing.
+4. Extract opportunity name, organization, contact, trade lane, service, cargo description, origin, destination, volume, weight, container type, quantity, incoterm, deadline/date information, and quote-preparation action.
+5. Let the user review and correct extracted fields before saving.
+6. Save uploaded files into a dated folder under `data/inquiries/`.
+7. Create an opportunity with `stage = Quote Requested`.
+8. Create an open `prepare_quote` task due on the reviewed next action date.
+9. Log an `Inquiry Received` activity with the opportunity, contact, organization, and saved file references.
 
 Rules:
 
@@ -58,8 +60,17 @@ Rules:
 - Do not auto-qualify strategic value beyond creating the quote-preparation task.
 - Existing organizations and contacts should be reused when matched by current CRM upsert rules.
 - Parsed inquiry details must stay editable before save.
+- Parse Inquiry and Manual Entry must both use the shared `create_opportunity(data)` database function.
+- New quotation-preparation fields on opportunities are optional and must default safely, with `quotation_status = Not Started`.
 - TXT, EML, CSV, PDF, DOCX, XLS, and XLSX attachments should be parsed when possible.
 - Attachments are saved for quotation preparation evidence, but unsupported attachment types may be saved without text extraction.
+
+Admin test-opportunity cleanup rules:
+
+- Preview matching records before deletion.
+- Require typed confirmation before deletion.
+- Only delete records that still match the strict cleanup rule in the database layer.
+- Target only obvious test records with zero revenue, stage `Interested`, no linked organization/contact, and test-like names containing `Need rate`, `Nhờ`, or `test`.
 
 ## Pricing Engine
 
@@ -395,11 +406,19 @@ Approved operational cases should be saved back into Case Library so the system 
 
 Legal upload rules:
 
-- PDF, DOCX, and TXT uploads may auto-fill metadata and draft key clauses.
+- PDF, DOCX, TXT, and pasted business text should go through the central document parser pipeline.
+- Parser flow is `Extract Text -> AI Parse -> Review -> Save`.
+- AI parser provider calls are abstracted through `AIParserProvider`.
+- Supported provider implementations are `RegexParserProvider`, `OpenAIParserProvider` stub, and `GeminiParserProvider` stub.
+- Regex parsing remains fallback only and should not be expanded aggressively.
+- Future parser quality should come from AI providers, not hundreds of fragile regex rules.
 - Auto-filled metadata is editable before save.
 - User approval is required per extracted clause.
 - Rejected or unapproved clauses must not become legal evidence.
 - Manual entry remains available when extraction fails or a document is not uploaded.
+- Parser output should include field-level confidence where possible.
+- Compliance enrichment may suggest topics, SOP matches, and case matches, but must not make legal conclusions.
+- Document upload must never be blocked only because parsing failed.
 
 Intelligence rules:
 

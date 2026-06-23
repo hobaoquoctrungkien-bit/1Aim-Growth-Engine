@@ -1,5 +1,57 @@
 # Decisions
 
+Date: 2026-06-23
+
+Decision:
+Opportunity creation uses shared `create_opportunity(data)` logic for both parsed inquiry and manual entry workflows.
+
+Reason:
+Parsed inquiry and manual entry create the same business object. A single save path avoids diverging schemas, duplicated insert logic, and quotation-preparation field drift as the opportunity-to-quotation workflow grows.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-23
+
+Decision:
+Regex parser is sufficient as fallback; future parser accuracy should come from pluggable AI providers.
+
+Reason:
+Adding hundreds of document-specific regex rules has low ROI and will remain less accurate than AI parsing for varied logistics, compliance, and commercial documents.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-23
+
+Decision:
+Document parsing is a central platform service, not a Legal Library-only feature.
+
+Reason:
+The same document intelligence pipeline should later power Knowledge Base, inquiry parsing, quotation generation, compliance checks, SOP intake, and shipment intake. Centralizing it avoids duplicated parsers and keeps future AI provider integration clean.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-23
+
+Decision:
+External AI providers are abstracted behind `parse_with_ai()` and not hardcoded in V1.
+
+Reason:
+1Aim needs the architecture for AI-assisted parsing now, while keeping the app usable without external API credentials. Regex/rule parsing remains a fallback when AI is unavailable.
+
+Approved By:
+Kien Ho
+
+---
+
 Date: 2026-06-22
 
 Decision:

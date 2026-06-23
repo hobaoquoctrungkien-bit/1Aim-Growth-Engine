@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-06-23
+
+- Added `document_parser_service.py` as the central document intelligence parser platform.
+- Added reusable parser pipeline: extract text, AI parser abstraction, fallback parser, review-ready structured JSON, tags, summary, key clauses, and field confidence.
+- Added document classification for legal, SOP, case, inquiry, commercial invoice, packing list, datasheet, permit, booking, shipment document, and other documents.
+- Added logistics document field extraction for invoice, packing list, datasheet, and permit metadata.
+- Updated Legal Library upload flow to `Extract Text -> AI Parse -> Parsed Information Preview -> User Review -> Save`.
+- Added compliance enrichment suggestions for possible topics, SOP matches, and case matches without making legal conclusions.
+- Added smoke tests for central document parser legal and commercial invoice extraction.
+- Added pluggable parser provider architecture with `AIParserProvider`, `RegexParserProvider`, `OpenAIParserProvider` stub, and `GeminiParserProvider` stub.
+- Added Admin System Settings for parser provider, parser models, and future OpenAI/Gemini API keys.
+- Changed parser selection to use configured AI provider first and fallback to regex when no AI provider exists or the stub/provider fails.
+- Documented that regex should remain fallback only and should not be expanded aggressively.
+
 ## 2026-06-21
 
 - Added CRM development rules documentation.
@@ -102,6 +116,10 @@
 - Added Opportunity Pipeline V1 with Opportunities menu, list, detail, create from Lead Detail, stage buttons, opportunity dashboard KPIs, and revenue KPIs.
 - Added Inquiry Intake workspace for pasted inquiry emails, attachment parsing, reviewed opportunity creation, automatic inquiry folders, saved files, prepare-quote tasks, and inquiry activity logging.
 - Moved Inquiry Intake into the Opportunities page and replaced the generic Create Opportunity form there.
+- Updated Opportunities creation to use `Parse Inquiry` and `Manual Entry` tabs under Create Opportunity.
+- Added shared `create_opportunity(data)` save path for parsed and manual opportunities.
+- Added optional quotation-preparation opportunity fields: cargo description, origin, destination, volume, weight, container type, quantity, incoterm, and quotation status.
+- Added Admin Clean Test Opportunities preview and typed-confirmation cleanup for strict test-like opportunity records.
 - Added smoke test coverage for inquiry extraction, file saving, opportunity creation, and prepare-quote task creation.
 - Refined global UI styling for dark-mode controls, focus states, tabs, expanders, disabled buttons, and reusable status badges while preserving large-font accessibility.
 - Reorganized Admin settings by moving UI Scale into System Settings, grouping email maintenance under Email Settings, and moving Daily Outreach Capacity into CRM Activation.

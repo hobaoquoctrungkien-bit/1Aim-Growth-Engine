@@ -172,6 +172,7 @@ Automate:
 - Data entry
 - OCR
 - Parsing
+- Reusable document intelligence parsing
 - Follow-up scheduling
 - Message drafting
 - Reporting
@@ -180,6 +181,8 @@ Automate:
 - Git backup diagnostics
 - Knowledge retrieval from approved stored evidence
 - Legal document metadata extraction and draft clause parsing
+- Central document parsing for legal, SOP, case, logistics, inquiry, quotation, compliance, and shipment-intake workflows
+- Pluggable document parser providers with regex used only as fallback
 
 Do not automate:
 

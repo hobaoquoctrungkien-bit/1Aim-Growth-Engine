@@ -17,7 +17,8 @@ class InquiryIntakeNavigationSmokeTest(unittest.TestCase):
         opportunity_detail_start = self.app_source.index("def show_opportunity_detail", opportunities_start)
         opportunities_section = self.app_source[opportunities_start:opportunity_detail_start]
         self.assertIn("show_inquiry_intake()", opportunities_section)
-        self.assertNotIn('st.subheader("Create Opportunity")', opportunities_section)
+        self.assertIn('st.subheader("Create Opportunity")', opportunities_section)
+        self.assertIn('st.tabs(["Parse Inquiry", "Manual Entry"])', opportunities_section)
 
 
 if __name__ == "__main__":

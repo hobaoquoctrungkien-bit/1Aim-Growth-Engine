@@ -86,6 +86,28 @@ def detect_trade_lane(text):
     return ""
 
 
+def detect_origin_destination(text):
+    origin = first_match(
+        [
+            r"\borigin\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\bpol\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\bfrom\s+(.+?)\s+to\s+.+?(?:[.\n,;]|$)",
+            r"\bpick\s*up\s*[:：]\s*(.+?)(?:\n|$)",
+        ],
+        text,
+    )
+    destination = first_match(
+        [
+            r"\bdestination\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\bpod\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\bfrom\s+.+?\s+to\s+(.+?)(?:[.\n,;]|$)",
+            r"\bdeliver(?:y)?\s*[:：]\s*(.+?)(?:\n|$)",
+        ],
+        text,
+    )
+    return origin.strip(" ,;.-"), destination.strip(" ,;.-")
+
+
 def detect_commodity(text):
     return first_match(
         [
@@ -106,6 +128,55 @@ def detect_volume(text):
         r"\b(?:volume|weight|quantity)\s*[:：]\s*(.+?)(?:\n|$)",
     ]
     return first_match(patterns, text)
+
+
+def detect_weight(text):
+    return first_match(
+        [
+            r"\bweight\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\b(gross weight\s*[:：]\s*.+?)(?:\n|$)",
+            r"\b(\d+(?:\.\d+)?\s*(?:kgs?|kg|tons?|tonnes?))\b",
+        ],
+        text,
+    )
+
+
+def detect_container_type(text):
+    return first_match(
+        [
+            r"\bcontainer\s*(?:type)?\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\b(\d+\s*x\s*(?:20|40|45)\s*(?:gp|hc|dv|rf|ft|feet|container)s?)\b",
+            r"\b((?:20|40|45)\s*(?:gp|hc|dv|rf|ft|feet|container))\b",
+        ],
+        text,
+    )
+
+
+def detect_quantity(text):
+    return first_match(
+        [
+            r"\bquantity\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\bqty\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\b(\d+\s*(?:ctns?|cartons?|pallets?|pkgs?|packages?|containers?))\b",
+        ],
+        text,
+    )
+
+
+def detect_incoterm(text):
+    match = re.search(r"\b(EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DDP)\b", text, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
+
+
+def detect_deadline(text):
+    return first_match(
+        [
+            r"\b(?:deadline|closing|ready date|cargo ready|etd|eta|date)\s*[:：]\s*(.+?)(?:\n|$)",
+            r"\b(?:before|by)\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+            r"\b(\d{4}-\d{2}-\d{2})\b",
+        ],
+        text,
+    )
 
 
 def detect_company(raw_text, sender_name):
@@ -154,20 +225,35 @@ def parse_inquiry_text(raw_text, attachment_texts=None):
     phone_match = PHONE_PATTERN.search(raw_text)
     service_type = detect_service_type(combined_text)
     country, city = detect_country_city(combined_text)
+    origin, destination = detect_origin_destination(combined_text)
+    cargo_description = detect_commodity(combined_text)
+
+    trade_lane = detect_trade_lane(combined_text)
+    if not trade_lane and origin and destination:
+        trade_lane = f"{origin} -> {destination}"
 
     parsed = {
         "subject": subject,
         "company_name": detect_company(raw_text, sender_name),
+        "organization": detect_company(raw_text, sender_name),
         "contact_person": sender_name,
         "email": email_match.group(0) if email_match else "",
         "phone": clean_text(phone_match.group(0)) if phone_match else "",
         "country": country,
         "city": city,
-        "trade_lane": detect_trade_lane(combined_text),
+        "trade_lane": trade_lane,
         "service_type": service_type,
         "mode": detect_mode(combined_text, service_type),
-        "commodity": detect_commodity(combined_text),
+        "commodity": cargo_description,
+        "cargo_description": cargo_description,
+        "origin": origin,
+        "destination": destination,
         "volume": detect_volume(combined_text),
+        "weight": detect_weight(combined_text),
+        "container_type": detect_container_type(combined_text),
+        "quantity": detect_quantity(combined_text),
+        "incoterm": detect_incoterm(combined_text),
+        "deadline": detect_deadline(combined_text),
         "inquiry_date": date.today().isoformat(),
         "next_action": "Prepare quotation",
         "next_action_date": date.today().isoformat(),
@@ -185,6 +271,8 @@ def parse_inquiry_text(raw_text, attachment_texts=None):
 
 def build_inquiry_notes(parsed, saved_files):
     sections = []
+    if parsed.get("user_notes"):
+        sections.append("User notes:\n" + parsed["user_notes"])
     if parsed.get("raw_text"):
         sections.append("Original inquiry:\n" + parsed["raw_text"])
     if parsed.get("attachment_text"):
