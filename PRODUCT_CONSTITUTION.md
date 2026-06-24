@@ -392,7 +392,11 @@ Knowledge Base:
 
 - Stores laws, decrees, circulars, official letters, internal SOPs, real-life cases, and customer-specific know-how for logistics, customs clearance, import/export compliance, quotation preparation, and shipment operations.
 - Assistant answers only from stored knowledge and must never fabricate legal references.
-- Uploaded legal documents may be auto-parsed, but extracted clauses become AI/search evidence only after human approval.
+- Compliance Engine converts approved legal sources and approved company knowledge into operational answers for import/export and specialized-management questions.
+- Approved legal sources always override compliance notes, SOPs, cases, and shipment experience.
+- Legal document metadata must be reviewed at document level. Parser output must include confidence, evidence text, and needs-review flags; unsupported metadata should remain blank.
+- Legal Q&A may use only admin-verified approved legal documents.
+- Uploaded legal documents and extracted clauses are trusted source material for traceability. Admin review focuses on generated Compliance Rules, not individual chunks.
 - Stores business intelligence assets: lessons learned, market intelligence, vendor intelligence, customer intelligence, and shipment history intelligence.
 - Intelligence records are reusable memory for human decision support, not automatic strategic decisions.
 - Opportunity and Quotation workflows may create intelligence records when useful learning appears before a shipment/job module exists.

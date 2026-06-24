@@ -1,5 +1,44 @@
 # Decisions
 
+Date: 2026-06-24
+
+Decision:
+Legal document ingestion prioritizes accurate document-level metadata over chunk or rule approval.
+
+Reason:
+Wrong legal metadata is worse than missing metadata. The parser must prefer blank fields with needs-review flags over unsupported guesses, and AI answers should rely only on admin-verified approved legal documents.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-24
+
+Decision:
+Compliance Knowledge Engine approval happens at Compliance Rule level, not extracted legal chunk level.
+
+Reason:
+Large legal documents can contain hundreds of chunks. Reviewing every chunk does not scale. Legal chunks should remain source references, while admins review the smaller set of generated operational rules.
+
+Approved By:
+Kien Ho
+
+---
+
+Date: 2026-06-24
+
+Decision:
+Compliance Knowledge Engine answers must prioritize approved legal documents over compliance notes, SOPs, cases, and shipment experience.
+
+Reason:
+The engine supports import/export compliance decisions. Internal interpretation is useful operational guidance, but it must never override approved legal authority or create fabricated legal basis.
+
+Approved By:
+Kien Ho
+
+---
+
 Date: 2026-06-23
 
 Decision:

@@ -8,7 +8,6 @@ from knowledge_service import (
     extract_key_clauses as regex_extract_key_clauses,
     extract_uploaded_text,
     normalize_date,
-    parse_legal_document_text,
     search_cases,
     search_sops,
 )
@@ -76,6 +75,7 @@ DEFAULT_FIELDS = {
     "parser_engine": "fallback",
     "parser_error": "",
     "raw_text": "",
+    "parsed_fields": {},
 }
 
 
@@ -150,6 +150,110 @@ def fold_text(value):
 def first_regex(pattern, text, flags=re.IGNORECASE):
     match = re.search(pattern, text or "", flags)
     return clean(match.group(1)) if match else ""
+
+
+def evidence_regex(pattern, text, flags=re.IGNORECASE):
+    match = re.search(pattern, text or "", flags)
+    if not match:
+        return "", ""
+    value = clean(match.group(1)) if match.groups() else clean(match.group(0))
+    return value, clean(match.group(0))
+
+
+def field_meta(value="", confidence="low", evidence_text="", needs_review=None):
+    value = clean(value)
+    confidence = clean(confidence).lower() or "low"
+    if confidence not in ["high", "medium", "low"]:
+        confidence = "low"
+    if confidence == "low":
+        value = ""
+    if needs_review is None:
+        needs_review = (not value) or confidence == "low"
+    return {
+        "value": value,
+        "confidence": confidence,
+        "evidence_text": clean(evidence_text),
+        "needs_review": bool(needs_review),
+    }
+
+
+def legal_document_type_with_evidence(text):
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for line in lines[:80]:
+        folded = fold_text(line).upper()
+        if re.search(r"\bLUAT\b", folded):
+            return "LAW", line
+        if re.search(r"\bNGHI\s+DINH\b", folded) or "ND-CP" in folded:
+            return "DECREE", line
+        if re.search(r"\bTHONG\s+TU\b", folded) or "TT-" in folded:
+            return "CIRCULAR", line
+        if re.search(r"\bCONG\s+VAN\b", folded):
+            return "OFFICIAL LETTER", line
+    return "", ""
+
+
+def authority_with_evidence(text):
+    authorities = [
+        ("QUOC HOI", "QUOC HOI"),
+        ("CHINH PHU", "CHINH PHU"),
+        ("BO TAI CHINH", "BO TAI CHINH"),
+        ("BO CONG THUONG", "BO CONG THUONG"),
+        ("BO THONG TIN VA TRUYEN THONG", "BO THONG TIN VA TRUYEN THONG"),
+        ("TONG CUC HAI QUAN", "TONG CUC HAI QUAN"),
+        ("BO Y TE", "BO Y TE"),
+    ]
+    for line in [line.strip() for line in (text or "").splitlines() if line.strip()][:80]:
+        folded = fold_text(line).upper()
+        for marker, value in authorities:
+            if marker in folded:
+                return value, line
+    return "", ""
+
+
+def title_with_evidence(text, document_type=""):
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for index, line in enumerate(lines[:80]):
+        folded = fold_text(line).upper()
+        if document_type == "LAW" and "LUAT" in folded:
+            if index + 1 < len(lines) and len(lines[index + 1]) > 5:
+                next_folded = fold_text(lines[index + 1]).upper()
+                if not next_folded.startswith("SO") and "NGAY" not in next_folded:
+                    return f"{line} {lines[index + 1]}".strip(), f"{line}\n{lines[index + 1]}"
+            return line, line
+        if document_type in ["DECREE", "CIRCULAR", "OFFICIAL LETTER"] and any(marker in folded for marker in ["NGHI DINH", "THONG TU", "CONG VAN"]):
+            if index + 1 < len(lines):
+                return f"{line} - {lines[index + 1]}".strip(), f"{line}\n{lines[index + 1]}"
+            return line, line
+    explicit, evidence = evidence_regex(r"(?:title|subject)\s*:?\s*([^\n]+)", text)
+    return explicit, evidence
+
+
+def legal_metadata_fields(text):
+    doc_type, doc_type_evidence = legal_document_type_with_evidence(text)
+    title, title_evidence = title_with_evidence(text, doc_type)
+    doc_no, doc_no_evidence = evidence_regex(r"(?:So|Số|No\.)\s*:?\s*([0-9A-Za-zĐđ/\-.]+)", text)
+    authority, authority_evidence = authority_with_evidence(text)
+    issue_raw, issue_evidence = evidence_regex(r"(ngay\s+\d{1,2}\s+thang\s+\d{1,2}\s+nam\s+\d{4})", fold_text(text))
+    if not issue_raw:
+        issue_raw, issue_evidence = evidence_regex(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", text)
+    effective_raw, effective_evidence = evidence_regex(r"(?:co hieu luc(?: thi hanh)? tu ngay|takes effect from)\s*([^\n.;]+)", fold_text(text))
+    tags = suggest_tags(text)
+    summary = generate_summary(text)
+    fields = {
+        "title": field_meta(title, "high" if title_evidence else "low", title_evidence),
+        "document_no": field_meta(doc_no, "high" if doc_no_evidence else "low", doc_no_evidence),
+        "document_type": field_meta(doc_type, "high" if doc_type_evidence else "low", doc_type_evidence),
+        "issuing_authority": field_meta(authority, "high" if authority_evidence else "low", authority_evidence),
+        "issue_date": field_meta(normalize_date(issue_raw), "high" if issue_evidence else "low", issue_evidence),
+        "effective_date": field_meta(normalize_date(effective_raw), "high" if effective_evidence else "low", effective_evidence),
+        "expiry_date": field_meta("", "low", ""),
+        "status": field_meta("Active", "medium", "Default legal document status; verify manually.", needs_review=True),
+        "category": field_meta("Import Compliance" if tags else "", "medium" if tags else "low", ", ".join(tags), needs_review=not bool(tags)),
+        "related_product_group": field_meta("SP_MMDS" if "civil cryptography" in tags else "", "medium" if "civil cryptography" in tags else "low", ", ".join(tags), needs_review=True),
+        "tags": field_meta(", ".join(tags), "medium" if tags else "low", ", ".join(tags), needs_review=not bool(tags)),
+        "summary": field_meta(summary, "medium" if summary else "low", summary[:500], needs_review=True),
+    }
+    return fields
 
 
 def merge_result(base, updates):
@@ -404,7 +508,15 @@ def fallback_parse_document(text, filename=""):
     tags = suggest_tags(text)
     summary = generate_summary(text)
     key_clauses = extract_key_clauses(text)
-    legal = parse_legal_document_text(text, filename) if document_type in ["LAW", "DECREE", "CIRCULAR", "OFFICIAL LETTER"] else {}
+    legal_fields = legal_metadata_fields(text)
+    legal = {
+        field: meta.get("value", "")
+        for field, meta in legal_fields.items()
+        if field not in ["tags"]
+    }
+    legal["tags"] = [item.strip() for item in legal_fields.get("tags", {}).get("value", "").split(",") if item.strip()]
+    if legal.get("document_type"):
+        document_type = legal["document_type"]
     logistics = parse_logistics_fields(text, document_type)
     sop = parse_sop_fields(text) if document_type == "SOP" else {}
     case = parse_case_fields(text) if document_type == "CASE" else {}
@@ -412,7 +524,7 @@ def fallback_parse_document(text, filename=""):
         {},
         {
             "document_type": document_type,
-            "title": legal.get("title") or first_regex(r"(?:title|subject)\s*:?\s*([^\n]+)", text) or Path(filename).stem,
+            "title": legal.get("title") or first_regex(r"(?:title|subject)\s*:?\s*([^\n]+)", text),
             "document_no": legal.get("document_no") or first_regex(r"(?:document no\.?|doc no\.?|no\.)\s*:?\s*([A-Za-z0-9\-/.]+)", text),
             "issuing_authority": legal.get("issuing_authority") or first_regex(r"(?:issuing authority|authority|issued by)\s*:?\s*([^\n]+)", text),
             "issue_date": legal.get("issue_date") or normalize_date(first_regex(r"(?:issue date|issued date|date)\s*:?\s*([^\n]+)", text)),
@@ -424,6 +536,7 @@ def fallback_parse_document(text, filename=""):
             "keywords": sorted(set((tags or []) + [document_type.lower()])),
             "key_clauses": key_clauses,
             "raw_text": text[:12000],
+            "parsed_fields": legal_fields,
             **logistics,
             **sop,
             **case,

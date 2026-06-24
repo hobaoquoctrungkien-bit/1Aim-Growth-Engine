@@ -44,8 +44,7 @@ class KnowledgeIntelligenceSmokeTest(unittest.TestCase):
         self.assertEqual(saved["source_id"], 999001)
 
         answer = generate_answer("unique_shipment_delay_lesson")
-        self.assertTrue(any(row["id"] == item_id for row in answer["intelligence"]))
-        self.assertIn("Supporting knowledge", answer["conclusion"])
+        self.assertEqual(answer["conclusion"], "Insufficient verified legal basis in the system.")
 
 
 if __name__ == "__main__":

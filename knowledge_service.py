@@ -1,4 +1,5 @@
 import re
+import json
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 from database import get_connection
 
 UPLOAD_DIR = Path("data/knowledge_uploads")
+APPROVED_STATUSES = ("Approved", "Active")
 
 
 def clean(value):
@@ -14,6 +16,10 @@ def clean(value):
 
 def like_query(text):
     return f"%{clean(text)}%"
+
+
+def approved_sql(column="approval_status"):
+    return f"COALESCE({column}, 'Approved') IN ('Approved', 'Active')"
 
 
 def ascii_fold(text):
@@ -324,10 +330,20 @@ def search_documents(keyword="", document_no="", authority="", category="", limi
         """
         SELECT *
         FROM knowledge_documents
-        WHERE (? = '' OR LOWER(title || ' ' || COALESCE(summary, '')) LIKE LOWER(?))
+        WHERE (? = '' OR LOWER(
+                title || ' ' ||
+                COALESCE(document_no, '') || ' ' ||
+                COALESCE(document_type, '') || ' ' ||
+                COALESCE(issuing_authority, '') || ' ' ||
+                COALESCE(category, '') || ' ' ||
+                COALESCE(summary, '') || ' ' ||
+                COALESCE(extracted_text, '')
+            ) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(document_no, '')) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(issuing_authority, '')) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(category, '')) LIKE LOWER(?))
+            AND LOWER(COALESCE(approval_status, 'Approved')) = 'approved'
+            AND COALESCE(metadata_review_status, 'needs_review') = 'admin_verified'
         ORDER BY COALESCE(effective_date, issue_date, created_at) DESC, id DESC
         LIMIT ?
         """,
@@ -359,7 +375,8 @@ def search_chunks(keyword="", limit=20):
             knowledge_documents.document_no,
             knowledge_documents.document_type,
             knowledge_documents.issuing_authority,
-            knowledge_documents.effective_date
+            knowledge_documents.effective_date,
+            knowledge_documents.metadata_review_status
         FROM knowledge_chunks
         LEFT JOIN knowledge_documents ON knowledge_documents.id = knowledge_chunks.document_id
         WHERE LOWER(
@@ -367,9 +384,12 @@ def search_chunks(keyword="", limit=20):
             COALESCE(knowledge_chunks.content, '') || ' ' ||
             COALESCE(knowledge_chunks.keywords, '') || ' ' ||
             COALESCE(knowledge_documents.title, '') || ' ' ||
-            COALESCE(knowledge_documents.document_no, '')
+            COALESCE(knowledge_documents.document_no, '') || ' ' ||
+            COALESCE(knowledge_documents.extracted_text, '')
         ) LIKE LOWER(?)
             AND COALESCE(knowledge_chunks.status, 'Approved') = 'Approved'
+            AND LOWER(COALESCE(knowledge_documents.approval_status, 'Approved')) = 'approved'
+            AND COALESCE(knowledge_documents.metadata_review_status, 'needs_review') = 'admin_verified'
         ORDER BY knowledge_chunks.id DESC
         LIMIT ?
         """,
@@ -395,8 +415,23 @@ def save_document(record, chunks=None, tag_names=None, document_id=None):
         "source_url",
         "file_path",
         "summary",
+        "related_product_group",
+        "approval_status",
+        "extracted_text",
+        "parser_raw_json",
+        "parser_provider",
+        "parser_confidence",
+        "parser_warnings",
+        "metadata_review_status",
     ]
-    values = [clean(record.get(field)) for field in fields]
+    values = []
+    for field in fields:
+        value = clean(record.get(field))
+        if field == "approval_status" and not value:
+            value = "Approved"
+        if field == "metadata_review_status" and not value:
+            value = "needs_review"
+        values.append(value)
     if document_id:
         cur.execute(
             """
@@ -404,6 +439,9 @@ def save_document(record, chunks=None, tag_names=None, document_id=None):
             SET title = ?, document_no = ?, document_type = ?, issuing_authority = ?,
                 issue_date = ?, effective_date = ?, expiry_date = ?, status = ?,
                 category = ?, source_url = ?, file_path = ?, summary = ?,
+                related_product_group = ?, approval_status = ?, extracted_text = ?,
+                parser_raw_json = ?, parser_provider = ?, parser_confidence = ?,
+                parser_warnings = ?, metadata_review_status = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
@@ -416,9 +454,11 @@ def save_document(record, chunks=None, tag_names=None, document_id=None):
             INSERT INTO knowledge_documents (
                 title, document_no, document_type, issuing_authority, issue_date,
                 effective_date, expiry_date, status, category, source_url, file_path,
-                summary, created_at, updated_at
+                summary, related_product_group, approval_status, extracted_text,
+                parser_raw_json, parser_provider, parser_confidence, parser_warnings,
+                metadata_review_status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             values,
         )
@@ -472,6 +512,7 @@ def search_sops(keyword="", category="", status="", limit=100):
         WHERE (? = '' OR LOWER(title || ' ' || COALESCE(purpose, '') || ' ' || COALESCE(procedure_steps, '') || ' ' || COALESCE(checklist, '')) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(category, '')) LIKE LOWER(?))
             AND (? = '' OR COALESCE(status, '') = ?)
+            AND COALESCE(approval_status, 'Approved') IN ('Approved', 'Active')
         ORDER BY updated_at DESC, id DESC
         LIMIT ?
         """,
@@ -493,6 +534,7 @@ def save_sop(record, sop_id=None):
         clean(record.get("related_cases")),
         clean(record.get("category")),
         clean(record.get("status")) or "Active",
+        clean(record.get("approval_status")) or "Approved",
         clean(record.get("created_by")) or "admin",
     )
     if sop_id:
@@ -501,7 +543,7 @@ def save_sop(record, sop_id=None):
             UPDATE knowledge_sops
             SET title = ?, purpose = ?, procedure_steps = ?, checklist = ?,
                 related_documents = ?, related_cases = ?, category = ?, status = ?,
-                created_by = ?, updated_at = CURRENT_TIMESTAMP
+                approval_status = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (*values, sop_id),
@@ -512,9 +554,9 @@ def save_sop(record, sop_id=None):
             """
             INSERT INTO knowledge_sops (
                 title, purpose, procedure_steps, checklist, related_documents,
-                related_cases, category, status, created_by, created_at, updated_at
+                related_cases, category, status, approval_status, created_by, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             values,
         )
@@ -535,6 +577,7 @@ def search_cases(keyword="", customer="", commodity="", hs_code="", country="", 
             AND (? = '' OR LOWER(COALESCE(commodity, '')) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(hs_code, '')) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(country, '')) LIKE LOWER(?))
+            AND COALESCE(approval_status, 'Approved') IN ('Approved', 'Active')
         ORDER BY updated_at DESC, id DESC
         LIMIT ?
         """,
@@ -570,6 +613,7 @@ def save_case(record, case_id=None):
         clean(record.get("legal_basis")),
         clean(record.get("risk_notes")),
         clean(record.get("attachments")),
+        clean(record.get("approval_status")) or "Approved",
         clean(record.get("created_by")) or "admin",
     )
     if case_id:
@@ -578,7 +622,7 @@ def save_case(record, case_id=None):
             UPDATE knowledge_cases
             SET title = ?, customer = ?, commodity = ?, hs_code = ?, country = ?,
                 problem = ?, solution = ?, legal_basis = ?, risk_notes = ?,
-                attachments = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP
+                attachments = ?, approval_status = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (*values, case_id),
@@ -589,9 +633,9 @@ def save_case(record, case_id=None):
             """
             INSERT INTO knowledge_cases (
                 title, customer, commodity, hs_code, country, problem, solution,
-                legal_basis, risk_notes, attachments, created_by, created_at, updated_at
+                legal_basis, risk_notes, attachments, approval_status, created_by, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             values,
         )
@@ -602,12 +646,498 @@ def save_case(record, case_id=None):
 
 
 INTELLIGENCE_TYPES = [
+    "Compliance Note",
     "Lessons Learned",
     "Market Intelligence",
     "Vendor Intelligence",
     "Customer Intelligence",
     "Shipment History Intelligence",
 ]
+
+
+def get_compliance_product_groups(active_only=True):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM compliance_product_groups
+        WHERE (? = 0 OR COALESCE(status, 'Active') = 'Active')
+        ORDER BY code
+        """,
+        (1 if active_only else 0,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_compliance_product_group(code="SP_MMDS"):
+    conn = get_connection()
+    row = conn.execute(
+        """
+        SELECT *
+        FROM compliance_product_groups
+        WHERE code = ?
+        """,
+        (clean(code),),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_compliance_keywords(product_group_code="SP_MMDS"):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT compliance_keywords.*
+        FROM compliance_keywords
+        JOIN compliance_product_groups ON compliance_product_groups.id = compliance_keywords.product_group_id
+        WHERE compliance_product_groups.code = ?
+        ORDER BY keyword_type, keyword
+        """,
+        (clean(product_group_code),),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def save_compliance_rule(record, rule_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    values = (
+        record.get("product_group_id") or None,
+        clean(record.get("rule_title")),
+        clean(record.get("rule_type")),
+        record.get("legal_document_id") or None,
+        clean(record.get("article_no")),
+        clean(record.get("clause_no")),
+        clean(record.get("appendix_no")),
+        clean(record.get("table_no")),
+        clean(record.get("content")),
+        clean(record.get("required_documents")),
+        clean(record.get("managing_authority")),
+        clean(record.get("effective_date")),
+        clean(record.get("approval_status")) or "pending_review",
+        clean(record.get("confidence_score")) or "Medium",
+        record.get("source_chunk_id") or None,
+    )
+    if rule_id:
+        cur.execute(
+            """
+            UPDATE compliance_rules
+            SET product_group_id = ?, rule_title = ?, rule_type = ?, legal_document_id = ?,
+                article_no = ?, clause_no = ?, appendix_no = ?, table_no = ?, content = ?,
+                required_documents = ?, managing_authority = ?, effective_date = ?,
+                approval_status = ?, confidence_score = ?, source_chunk_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (*values, rule_id),
+        )
+        saved_id = rule_id
+    else:
+        cur.execute(
+            """
+            INSERT INTO compliance_rules (
+                product_group_id, rule_title, rule_type, legal_document_id, article_no,
+                clause_no, appendix_no, table_no, content, required_documents,
+                managing_authority, effective_date, approval_status, confidence_score, source_chunk_id,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            values,
+        )
+        saved_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return saved_id
+
+
+def update_compliance_rule_status(rule_id, approval_status):
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE compliance_rules
+        SET approval_status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (clean(approval_status), rule_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_document_chunks(document_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM knowledge_chunks
+        WHERE document_id = ?
+        ORDER BY id
+        """,
+        (document_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+COMPLIANCE_RULE_PATTERNS = [
+    ("Import License Required", "Permit Requirement", ["giay phep", "import license", "license", "permit", "nhap khau"]),
+    ("Export License Required", "Permit Requirement", ["giay phep", "export license", "xuat khau"]),
+    ("Specialized Inspection Required", "Specialized Inspection", ["kiem tra chuyen nganh", "kiem tra chat luong", "quality inspection"]),
+    ("Conformity Certification Required", "Certification", ["chung nhan", "cong bo hop quy", "certification", "conformity"]),
+    ("Product Listed Under Specialized Management", "Specialized Management", ["quan ly chuyen nganh", "danh muc san pham", "specialized management"]),
+    ("Notification Requirement", "Notification", ["thong bao", "notification"]),
+    ("Permit Requirement", "Permit Requirement", ["giay phep", "permit"]),
+    ("Restricted Product", "Restriction", ["cam", "han che", "restricted", "prohibited"]),
+    ("Exempted Product", "Exemption", ["mien tru", "ngoai le", "exempt", "exception"]),
+    ("Business Condition Required", "Business Condition", ["dieu kien kinh doanh", "business condition"]),
+]
+
+
+def classify_compliance_rule(content):
+    folded = ascii_fold(content)
+    for title, rule_type, terms in COMPLIANCE_RULE_PATTERNS:
+        if any(ascii_fold(term) in folded for term in terms):
+            return title, rule_type
+    return "Compliance Requirement", "General Requirement"
+
+
+def generate_compliance_rule_candidates(parsed_document, product_group_code="SP_MMDS"):
+    parsed = parsed_document or {}
+    chunks = parsed.get("key_clauses") or parsed.get("chunks") or []
+    candidates = []
+    seen = set()
+    for chunk in chunks:
+        content = clean(chunk.get("content"))
+        if not content:
+            continue
+        title, rule_type = classify_compliance_rule(content)
+        if title == "Compliance Requirement":
+            continue
+        dedupe_key = (title, chunk.get("article_no") or "", chunk.get("clause_no") or "", content[:120])
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        required_documents = []
+        folded = ascii_fold(content)
+        if "giay phep" in folded or "permit" in folded or "license" in folded:
+            required_documents.append("Permit / license dossier if applicable")
+        if "chung nhan" in folded or "cong bo hop quy" in folded or "certification" in folded:
+            required_documents.append("Certificate / conformity declaration if applicable")
+        if "kiem tra" in folded:
+            required_documents.append("Specialized inspection registration if applicable")
+        candidates.append(
+            {
+                "product_group_code": product_group_code,
+                "rule_title": title,
+                "rule_type": rule_type,
+                "article_no": clean(chunk.get("article_no")),
+                "clause_no": clean(chunk.get("clause_no")),
+                "appendix_no": clean(chunk.get("appendix_no")),
+                "table_no": clean(chunk.get("table_no")),
+                "content": content,
+                "required_documents": "\n".join(required_documents),
+                "managing_authority": clean(parsed.get("issuing_authority")),
+                "effective_date": clean(parsed.get("effective_date")),
+                "approval_status": "pending_review",
+                "confidence_score": parsed.get("confidence_score") or "Medium",
+            }
+        )
+    return candidates[:20]
+
+
+def _match_source_chunk(chunks, candidate):
+    article = clean(candidate.get("article_no"))
+    clause = clean(candidate.get("clause_no"))
+    content = clean(candidate.get("content"))
+    for chunk in chunks:
+        if article and article != clean(chunk.get("article_no")):
+            continue
+        if clause and clause != clean(chunk.get("clause_no")):
+            continue
+        chunk_content = clean(chunk.get("content"))
+        if content and (content[:160] in chunk_content or chunk_content[:160] in content):
+            return chunk.get("id")
+    for chunk in chunks:
+        chunk_content = clean(chunk.get("content"))
+        if content and (content[:160] in chunk_content or chunk_content[:160] in content):
+            return chunk.get("id")
+    return None
+
+
+def save_candidate_compliance_rules(document_id, product_group_code, candidates):
+    group = get_compliance_product_group(product_group_code)
+    if not group:
+        return []
+    chunks = get_document_chunks(document_id)
+    saved_ids = []
+    for candidate in candidates or []:
+        record = {
+            **candidate,
+            "product_group_id": group.get("id"),
+            "legal_document_id": document_id,
+            "source_chunk_id": _match_source_chunk(chunks, candidate),
+            "approval_status": candidate.get("approval_status") or "pending_review",
+        }
+        saved_ids.append(save_compliance_rule(record))
+    return saved_ids
+
+
+def save_compliance_note(record, note_id=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    values = (
+        clean(record.get("title")),
+        clean(record.get("topic")),
+        record.get("product_group_id") or None,
+        clean(record.get("summary")),
+        clean(record.get("interpretation")),
+        clean(record.get("operational_guidance")),
+        clean(record.get("risk_notes")),
+        clean(record.get("related_documents")),
+        clean(record.get("related_sops")),
+        clean(record.get("related_cases")),
+        clean(record.get("approval_status")) or "Pending",
+        clean(record.get("created_by")) or "admin",
+    )
+    if note_id:
+        cur.execute(
+            """
+            UPDATE compliance_notes
+            SET title = ?, topic = ?, product_group_id = ?, summary = ?, interpretation = ?,
+                operational_guidance = ?, risk_notes = ?, related_documents = ?, related_sops = ?,
+                related_cases = ?, approval_status = ?, created_by = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (*values, note_id),
+        )
+        saved_id = note_id
+    else:
+        cur.execute(
+            """
+            INSERT INTO compliance_notes (
+                title, topic, product_group_id, summary, interpretation, operational_guidance,
+                risk_notes, related_documents, related_sops, related_cases, approval_status,
+                created_by, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            values,
+        )
+        saved_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return saved_id
+
+
+def search_compliance_rules(product_group_code="SP_MMDS", keyword="", approved_only=True, limit=100):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            cr.*,
+            cpg.code AS product_group_code,
+            kd.title AS legal_document_title,
+            kd.document_no AS legal_document_no,
+            kc.heading AS source_heading,
+            kc.content AS source_content
+        FROM compliance_rules cr
+        LEFT JOIN compliance_product_groups cpg ON cpg.id = cr.product_group_id
+        LEFT JOIN knowledge_documents kd ON kd.id = cr.legal_document_id
+        LEFT JOIN knowledge_chunks kc ON kc.id = cr.source_chunk_id
+        WHERE cpg.code = ?
+            AND (? = '' OR LOWER(
+                COALESCE(cr.rule_title, '') || ' ' ||
+                COALESCE(cr.rule_type, '') || ' ' ||
+                COALESCE(cr.content, '') || ' ' ||
+                COALESCE(cr.required_documents, '') || ' ' ||
+                COALESCE(kd.document_no, '')
+            ) LIKE LOWER(?))
+            AND (? = 0 OR COALESCE(cr.approval_status, 'Approved') = 'Approved')
+        ORDER BY COALESCE(cr.effective_date, cr.updated_at) DESC, cr.id DESC
+        LIMIT ?
+        """,
+        (clean(product_group_code), clean(keyword), like_query(keyword), 1 if approved_only else 0, int(limit or 100)),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def search_compliance_notes(product_group_code="SP_MMDS", keyword="", approved_only=True, limit=100):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            compliance_notes.*,
+            compliance_product_groups.code AS product_group_code
+        FROM compliance_notes
+        LEFT JOIN compliance_product_groups ON compliance_product_groups.id = compliance_notes.product_group_id
+        WHERE compliance_product_groups.code = ?
+            AND (? = '' OR LOWER(
+                COALESCE(title, '') || ' ' ||
+                COALESCE(topic, '') || ' ' ||
+                COALESCE(summary, '') || ' ' ||
+                COALESCE(interpretation, '') || ' ' ||
+                COALESCE(operational_guidance, '') || ' ' ||
+                COALESCE(risk_notes, '')
+            ) LIKE LOWER(?))
+            AND (? = 0 OR COALESCE(compliance_notes.approval_status, 'Pending') = 'Approved')
+        ORDER BY compliance_notes.updated_at DESC, compliance_notes.id DESC
+        LIMIT ?
+        """,
+        (clean(product_group_code), clean(keyword), like_query(keyword), 1 if approved_only else 0, int(limit or 100)),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def search_product_group_documents(product_group_code="SP_MMDS", keyword="", limit=100):
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM knowledge_documents
+        WHERE COALESCE(approval_status, 'Approved') IN ('Approved', 'Active')
+            AND (
+                LOWER(COALESCE(related_product_group, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(category, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(summary, '')) LIKE LOWER(?)
+                OR LOWER(COALESCE(title, '')) LIKE LOWER(?)
+            )
+            AND (? = '' OR LOWER(
+                COALESCE(title, '') || ' ' ||
+                COALESCE(document_no, '') || ' ' ||
+                COALESCE(summary, '') || ' ' ||
+                COALESCE(category, '')
+            ) LIKE LOWER(?))
+        ORDER BY COALESCE(effective_date, issue_date, created_at) DESC, id DESC
+        LIMIT ?
+        """,
+        (
+            like_query(product_group_code),
+            like_query(product_group_code),
+            like_query(product_group_code),
+            like_query(product_group_code),
+            clean(keyword),
+            like_query(keyword),
+            int(limit or 100),
+        ),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def retrieve_compliance_context(question, product_group_code="SP_MMDS", limit=8):
+    group = get_compliance_product_group(product_group_code)
+    keywords = get_compliance_keywords(product_group_code)
+    query = clean(question)
+    return {
+        "product_group": group,
+        "keywords": keywords,
+        "legal_documents": search_product_group_documents(product_group_code, "", limit=limit),
+        "rules": search_compliance_rules(product_group_code, query, approved_only=True, limit=limit),
+        "notes": search_compliance_notes(product_group_code, query, approved_only=True, limit=limit),
+        "sops": search_sops(keyword=query, category="", status="Active", limit=limit),
+        "cases": search_cases(keyword=query, limit=limit),
+        "intelligence": search_intelligence(keyword=query, limit=limit),
+    }
+
+
+def _source_lines(rows, fields):
+    lines = []
+    for row in rows:
+        parts = [clean(row.get(field)) for field in fields if clean(row.get(field))]
+        if parts:
+            lines.append(" - ".join(parts))
+    return lines
+
+
+def generate_compliance_answer(question, product_group_code="SP_MMDS"):
+    context = retrieve_compliance_context(question, product_group_code)
+    group = context.get("product_group") or {}
+    rules = context.get("rules") or []
+    legal_documents = context.get("legal_documents") or []
+    notes = context.get("notes") or []
+    sops = context.get("sops") or []
+    cases = context.get("cases") or []
+    intelligence = context.get("intelligence") or []
+    if not rules:
+        return {
+            "conclusion": "Insufficient approved basis in the system.",
+            "product_group": group.get("code") or product_group_code,
+            "managing_authority": group.get("managing_authority") or "",
+            "legal_basis": "",
+            "document_number": "",
+            "article_clause": "",
+            "relevant_compliance_notes": notes,
+            "relevant_sops": sops,
+            "relevant_cases": cases,
+            "required_documents": "",
+            "required_actions": "Generate and approve compliance rules from the legal source before advising customer.",
+            "risk_notes": "Do not classify product or advise customer from raw legal text without approved compliance rules.",
+            "uncertainty": "Approved compliance rule is missing.",
+            "recommended_next_step": "Review candidate compliance rules and approve the applicable rule.",
+            "sources_used": [],
+            "confidence": "Low",
+            "context": context,
+        }
+
+    rule_lines = _source_lines(rules, ["rule_title", "content"])
+    document_lines = _source_lines(legal_documents, ["document_no", "title", "issuing_authority"])
+    article_clause = ", ".join(
+        line
+        for line in _source_lines(rules, ["article_no", "clause_no", "appendix_no", "table_no"])
+        if line
+    )
+    required_documents = "\n".join(row.get("required_documents") or "" for row in rules if row.get("required_documents"))
+    note_text = " ".join((row.get("interpretation") or row.get("summary") or "") for row in notes)
+    legal_text = " ".join((row.get("content") or row.get("summary") or "") for row in [*rules, *legal_documents])
+    conflict_warning = ""
+    if note_text and legal_text and "khong can" in ascii_fold(note_text) and "can" in ascii_fold(legal_text):
+        conflict_warning = "Internal interpretation conflicts with legal source."
+    return {
+        "conclusion": "Approved legal basis was found. Use the legal basis first, then review internal guidance before advising customer.",
+        "product_group": group.get("code") or product_group_code,
+        "managing_authority": group.get("managing_authority") or "",
+        "legal_basis": "\n".join([*rule_lines, *document_lines]),
+        "document_number": ", ".join(sorted({clean(row.get("legal_document_no") or row.get("document_no")) for row in [*rules, *legal_documents] if clean(row.get("legal_document_no") or row.get("document_no"))})),
+        "article_clause": article_clause,
+        "relevant_compliance_notes": notes,
+        "relevant_sops": sops,
+        "relevant_cases": cases,
+        "required_documents": required_documents,
+        "required_actions": "Confirm exact model, HS code, encryption function, and current effective legal document before final customer advice.",
+        "risk_notes": conflict_warning or "Internal notes, SOPs, cases, and shipment experience are interpretation only. Legal documents override them.",
+        "uncertainty": "Product classification still requires model/spec review unless the legal source directly covers the exact product.",
+        "recommended_next_step": "Attach the legal document/rule to the shipment or quotation file and follow the approved SOP.",
+        "sources_used": [
+            *[
+                {
+                    "source_type": "Legal Rule",
+                    "title": row.get("rule_title"),
+                    "document_no": row.get("legal_document_no"),
+                    "article_no": row.get("article_no"),
+                    "clause_no": row.get("clause_no"),
+                    "source_chunk_id": row.get("source_chunk_id"),
+                    "source_content": row.get("source_content"),
+                }
+                for row in rules
+            ],
+            *[
+                {
+                    "source_type": "Legal Document",
+                    "title": row.get("title"),
+                    "document_no": row.get("document_no"),
+                    "article_no": "",
+                    "clause_no": "",
+                }
+                for row in legal_documents
+            ],
+        ],
+        "confidence": "High" if rules else "Medium",
+        "context": context,
+    }
 
 
 def search_intelligence(keyword="", intelligence_type="", country="", entity_name="", tags="", limit=100):
@@ -628,6 +1158,7 @@ def search_intelligence(keyword="", intelligence_type="", country="", entity_nam
             AND (? = '' OR LOWER(COALESCE(entity_name, '')) LIKE LOWER(?))
             AND (? = '' OR LOWER(COALESCE(tags, '')) LIKE LOWER(?))
             AND COALESCE(status, 'Active') = 'Active'
+            AND COALESCE(approval_status, 'Approved') IN ('Approved', 'Active')
         ORDER BY updated_at DESC, id DESC
         LIMIT ?
         """,
@@ -668,6 +1199,7 @@ def save_intelligence(record, intelligence_id=None):
         clean(record.get("confidence")) or "Medium",
         clean(record.get("tags")),
         clean(record.get("status")) or "Active",
+        clean(record.get("approval_status")) or "Approved",
         clean(record.get("created_by")) or "admin",
     )
     if intelligence_id:
@@ -676,7 +1208,7 @@ def save_intelligence(record, intelligence_id=None):
             UPDATE knowledge_intelligence
             SET intelligence_type = ?, title = ?, entity_name = ?, country = ?,
                 lane = ?, commodity = ?, hs_code = ?, summary = ?, details = ?,
-                source = ?, source_type = ?, source_id = ?, confidence = ?, tags = ?, status = ?, created_by = ?,
+                source = ?, source_type = ?, source_id = ?, confidence = ?, tags = ?, status = ?, approval_status = ?, created_by = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
@@ -689,9 +1221,9 @@ def save_intelligence(record, intelligence_id=None):
             INSERT INTO knowledge_intelligence (
                 intelligence_type, title, entity_name, country, lane, commodity,
                 hs_code, summary, details, source, source_type, source_id, confidence, tags, status,
-                created_by, created_at, updated_at
+                approval_status, created_by, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             values,
         )
@@ -714,16 +1246,16 @@ def retrieve_context(question, limit=5):
 
 def generate_answer(question):
     context = retrieve_context(question)
-    evidence_count = sum(len(context[key]) for key in context)
-    if evidence_count == 0:
+    legal_evidence_count = len(context.get("documents", [])) + len(context.get("chunks", []))
+    if legal_evidence_count == 0:
         return {
-            "conclusion": "Insufficient information in knowledge base.",
+            "conclusion": "Insufficient verified legal basis in the system.",
             "legal_basis": "",
             "relevant_documents": [],
             "applicable_sops": [],
             "related_cases": [],
             "intelligence": [],
-            "risk_notes": "No supporting evidence was found. Do not provide legal or compliance advice from memory.",
+            "risk_notes": "No admin-verified approved legal document supports this answer. Prefer blank/uncertain over wrong legal basis.",
             "confidence": "Low",
             "context": context,
         }
@@ -734,6 +1266,7 @@ def generate_answer(question):
             "document_no": chunk.get("document_no"),
             "issuing_authority": chunk.get("issuing_authority"),
             "effective_date": chunk.get("effective_date"),
+            "excerpt": (chunk.get("content") or "")[:900],
         }
         for chunk in context["chunks"]
         if chunk.get("document_title")
@@ -758,7 +1291,7 @@ def generate_answer(question):
     )
 
     return {
-        "conclusion": "Supporting knowledge was found. Review the evidence below before advising customer.",
+        "conclusion": "Verified legal basis was found. Review the source excerpt before advising customer.",
         "legal_basis": legal_basis,
         "relevant_documents": documents,
         "applicable_sops": sops,

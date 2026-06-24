@@ -80,7 +80,7 @@ Nghị định này có hiệu lực từ ngày 15/05/2018.
             any(row["document_id"] == document_id for row in search_chunks("unique_pending_clause_for_ai_ignore"))
         )
         answer = generate_answer("unique_pending_clause_for_ai_ignore")
-        self.assertEqual(answer["conclusion"], "Insufficient information in knowledge base.")
+        self.assertEqual(answer["conclusion"], "Insufficient verified legal basis in the system.")
 
 
 if __name__ == "__main__":

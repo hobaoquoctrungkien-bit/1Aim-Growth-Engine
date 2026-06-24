@@ -1,7 +1,23 @@
 # Changelog
 
+## 2026-06-24
+
+- Refocused Legal Document ingestion around document-level metadata review with parser evidence, confidence, and needs-review flags.
+- Added parser storage fields for extracted text, raw parser JSON, parser provider/confidence/warnings, and metadata review status.
+- Changed Legal Library upload flow from rule/chunk review to `Parse Metadata -> Review Evidence -> Save as Verified Document`.
+- Changed Knowledge Base AI Assistant to use only admin-verified approved legal documents and return `Insufficient verified legal basis in the system.` when no verified legal source supports the answer.
+- Simplified Compliance Knowledge Engine approval workflow so admins approve generated Compliance Rules instead of reviewing individual legal chunks.
+- Added candidate compliance rule generation from parsed legal clauses with `pending_review` default status, confidence score, and source chunk citation.
+- Added Compliance Rule review actions for approve, reject, edit, and view original source.
+- Added Compliance Knowledge Engine V1 inside Knowledge Base with SP_MMDS workspace, compliance rules, compliance notes, related legal documents, SOPs, cases, and approved-source question answering.
+- Added compliance database structures for product groups, rules, keywords, and notes, plus approval/status fields for Knowledge evidence filtering.
+- Seeded SP_MMDS product group and civil cryptography keywords.
+- Added smoke tests for pending/rejected source exclusion, approved legal source retrieval, document/article display, and legal-source hierarchy.
+
 ## 2026-06-23
 
+- Moved Knowledge Base schema, migration, and seed code out of `database.py` into `db/knowledge_schema.py` and `db/knowledge_seed.py`.
+- Moved Knowledge Base UI functions out of `app.py` into `pages/knowledge_base.py` so `app.py` only routes to the Knowledge Base workspace.
 - Added `document_parser_service.py` as the central document intelligence parser platform.
 - Added reusable parser pipeline: extract text, AI parser abstraction, fallback parser, review-ready structured JSON, tags, summary, key clauses, and field confidence.
 - Added document classification for legal, SOP, case, inquiry, commercial invoice, packing list, datasheet, permit, booking, shipment document, and other documents.

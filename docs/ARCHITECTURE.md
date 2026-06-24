@@ -9,7 +9,10 @@ Product direction is governed by `PRODUCT_CONSTITUTION.md`, which is the highest
 Primary files:
 
 - `app.py`: Streamlit UI and page flows.
+- `pages/knowledge_base.py`: Knowledge Base UI pages for Legal Library, SOP Library, Case Library, Intelligence Library, and evidence-only AI Assistant.
 - `database.py`: SQLite schema, migrations, business logic, scoring, CRM queries.
+- `db/knowledge_schema.py`: Knowledge Base table creation and migration helpers.
+- `db/knowledge_seed.py`: Knowledge Base seed data for starter tags, documents, SOPs, cases, and intelligence records.
 - `typography.py`: global typography tokens and UI scale.
 - `ui_helpers.py`: reusable UI presentation helpers for safe badges and shared visual fragments.
 - `data/growth_engine.db`: local SQLite database.
@@ -38,6 +41,10 @@ Core CRM tables:
 - `knowledge_document_tags`
 - `knowledge_sops`
 - `knowledge_intelligence`
+- `compliance_product_groups`
+- `compliance_rules`
+- `compliance_keywords`
+- `compliance_notes`
 - `backup_history`
 - `vendor_rates`
 
@@ -100,6 +107,30 @@ Both scores are calculated from existing organization/contact/lead fields. They 
 Relationship health is calculated at read time for Lead Detail. It is not stored as a separate field. It combines customer status, relationship status, last contact recency, next follow-up discipline, and CRM data quality.
 
 Missing Data Checklist is also calculated at read time from existing contact and organization fields. It is not stored as a table or field.
+
+## Knowledge And Compliance
+
+Knowledge Base stores legal documents, approved chunks, SOPs, cases, intelligence records, and compliance-specific interpretation.
+
+Compliance Knowledge Engine V1 adds SP_MMDS as the first product group for civil cryptography products. It uses:
+
+- `compliance_product_groups` for product group identity, code, authority, and status.
+- `compliance_rules` for reviewable operational rules linked to legal documents, source chunks, and article/clause references.
+- `compliance_keywords` for product group matching terms.
+- `compliance_notes` for admin interpretation and operational guidance.
+
+Legal documents and chunks are trusted source material for traceability and citation, but chunks are not approval units. Admin approval happens at Compliance Rule level. Compliance answers require approved compliance rules; compliance notes, SOPs, cases, and intelligence are supporting interpretation only and cannot override approved legal sources.
+
+Legal document ingestion stores document-level metadata review state:
+
+- `extracted_text`
+- `parser_raw_json`
+- `parser_provider`
+- `parser_confidence`
+- `parser_warnings`
+- `metadata_review_status`
+
+Legal Q&A uses only legal documents where `metadata_review_status = admin_verified` and `approval_status = Approved`. Parser output must prefer blank fields over guessed metadata and include source evidence for each parsed metadata field.
 
 ## Dashboard
 
