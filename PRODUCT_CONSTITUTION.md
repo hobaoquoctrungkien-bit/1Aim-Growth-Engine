@@ -165,6 +165,26 @@ Current implementation status:
 - Dashboard is already treated as an action cockpit.
 - Today's Action List, action score, relationship funnel, data quality, China network, campaign progress, country pipeline, backup status, and opportunity KPIs exist.
 
+## 7A. Execution Engine Principles
+
+1Aim Growth Engine is not a task manager. It is an execution engine.
+
+Rules:
+
+- The dashboard must prioritize work by Money Proximity Score: 100 for money-is-here work, 50 for money enablers, 20 for infrastructure, and 0 for nice-to-have work.
+- Money-is-here work includes new inquiries, quotation preparation, quotation follow-up, sales calls, customer meetings, payment collection, and shipment confirmation.
+- Projects must not be presented as executable work until converted into a clear next action.
+- A next action must have one owner, a clear verb, a clear outcome, and a due date whenever possible.
+- The dashboard should show a Current Mission with one task, estimated time, expected outcome, and DONE action.
+- Open Loop Score counts open tasks and projects missing an owner, next action, or due date.
+- Parking Lot exists for projects, ideas, and future improvements that should not flood the user.
+
+Current implementation status:
+
+- Tasks support Money Proximity Score, expected outcome, estimated minutes, and project marking.
+- Inbound inquiries and quotation follow-ups are automatically created as Money-is-here tasks.
+- Dashboard now surfaces Money is Here, Current Mission, Next Action, Parking Lot, and Open Loops before reporting widgets.
+
 ## 8. Automation Principles
 
 Automate:

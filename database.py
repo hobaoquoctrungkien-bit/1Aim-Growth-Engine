@@ -528,6 +528,10 @@ def init_db():
         due_date TEXT,
         status TEXT DEFAULT 'open',
         priority TEXT DEFAULT 'normal',
+        money_proximity_score INTEGER DEFAULT 0,
+        expected_outcome TEXT,
+        estimated_minutes INTEGER DEFAULT 30,
+        is_project INTEGER DEFAULT 0,
         assigned_to INTEGER,
         created_by INTEGER,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -545,6 +549,10 @@ def init_db():
 
     add_column("tasks", "channel TEXT")
     add_column("tasks", "campaign_name TEXT")
+    add_column("tasks", "money_proximity_score INTEGER DEFAULT 0")
+    add_column("tasks", "expected_outcome TEXT")
+    add_column("tasks", "estimated_minutes INTEGER DEFAULT 30")
+    add_column("tasks", "is_project INTEGER DEFAULT 0")
     add_column("contacts", "email_status TEXT DEFAULT 'Unknown'")
     add_column("outreach_campaigns", "country_filter TEXT")
     add_column("outreach_campaigns", "membership_filter TEXT")
@@ -852,6 +860,78 @@ def clean_value(value):
 
 
 OPPORTUNITY_STAGES = ["Interested", "Quote Requested", "Quoted", "Negotiation", "Won", "Lost"]
+
+MONEY_TIER_LABELS = {
+    100: "MONEY IS HERE",
+    50: "MONEY ENABLER",
+    20: "INFRASTRUCTURE",
+    0: "NICE TO HAVE",
+}
+
+TASK_MPS_DEFAULTS = {
+    "inquiry_received": 100,
+    "prepare_quote": 100,
+    "quote_follow_up": 100,
+    "sales_call": 100,
+    "customer_meeting": 100,
+    "olo_meeting_prep": 100,
+    "payment_collection": 100,
+    "shipment_confirmation": 100,
+    "lead_import": 50,
+    "crm_cleanup": 50,
+    "marketing_content": 50,
+    "website_update": 50,
+    "sales_material": 50,
+    "membership_profile": 50,
+    "relationship_touch": 50,
+    "outreach": 50,
+    "crm_development": 20,
+    "growth_engine_enhancement": 20,
+    "compliance_database": 20,
+    "sop_optimization": 20,
+    "automation_project": 20,
+    "documentation": 20,
+    "ui_cosmetic": 0,
+}
+
+
+def money_tier_label(score):
+    score = int(score or 0)
+    if score >= 100:
+        return MONEY_TIER_LABELS[100]
+    if score >= 50:
+        return MONEY_TIER_LABELS[50]
+    if score >= 20:
+        return MONEY_TIER_LABELS[20]
+    return MONEY_TIER_LABELS[0]
+
+
+def money_proximity_score_for_task(task_type=None, title=None):
+    clean_type = normalize(clean_value(task_type))
+    if clean_type in TASK_MPS_DEFAULTS:
+        return TASK_MPS_DEFAULTS[clean_type]
+
+    clean_title = normalize(clean_value(title))
+    tier_1_words = [
+        "inquiry",
+        "quote",
+        "quotation",
+        "follow up quote",
+        "sales call",
+        "customer meeting",
+        "payment",
+        "shipment confirmation",
+    ]
+    tier_2_words = ["lead", "crm cleanup", "marketing", "website", "sales material", "membership"]
+    tier_3_words = ["development", "engine", "compliance", "sop", "automation", "documentation"]
+
+    if any(word in clean_title for word in tier_1_words):
+        return 100
+    if any(word in clean_title for word in tier_2_words):
+        return 50
+    if any(word in clean_title for word in tier_3_words):
+        return 20
+    return 0
 
 
 def normalize_opportunity_stage(value):
@@ -1973,10 +2053,13 @@ def create_inquiry(inquiry_text):
             due_date,
             status,
             priority,
+            money_proximity_score,
+            expected_outcome,
+            estimated_minutes,
             assigned_to,
             created_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             opportunity_id,
@@ -1985,6 +2068,9 @@ def create_inquiry(inquiry_text):
             today,
             "open",
             "high",
+            100,
+            "Quotation ready to send",
+            30,
             admin_user_id,
             admin_user_id,
         ),
@@ -2144,10 +2230,13 @@ def create_opportunity(data, user="admin"):
                 due_date,
                 status,
                 priority,
+                money_proximity_score,
+                expected_outcome,
+                estimated_minutes,
                 assigned_to,
                 created_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 opportunity_id,
@@ -2156,6 +2245,9 @@ def create_opportunity(data, user="admin"):
                 clean_record.get("next_action_date") or today,
                 "open",
                 "high",
+                100,
+                "Quotation ready to send",
+                30,
                 admin_user_id,
                 admin_user_id,
             ),
@@ -2320,10 +2412,13 @@ def mark_prepare_quote_sent(task_id, follow_up_date, current_user_id=None):
             due_date,
             status,
             priority,
+            money_proximity_score,
+            expected_outcome,
+            estimated_minutes,
             assigned_to,
             created_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             opportunity_id,
@@ -2333,6 +2428,9 @@ def mark_prepare_quote_sent(task_id, follow_up_date, current_user_id=None):
             follow_up_date,
             "open",
             "high",
+            100,
+            "Customer gives a decision, question, or next step",
+            15,
             task["assigned_to"],
             task["created_by"],
         ),
@@ -2370,6 +2468,7 @@ def get_open_tasks():
         FROM tasks
         WHERE status = 'open'
         ORDER BY
+            money_proximity_score DESC,
             CASE priority
                 WHEN 'high' THEN 1
                 WHEN 'normal' THEN 2
@@ -2382,6 +2481,169 @@ def get_open_tasks():
 
     conn.close()
     return tasks
+
+
+def complete_execution_task(task_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE tasks
+        SET status = 'closed',
+            completed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+            AND status = 'open'
+        """,
+        (task_id,),
+    )
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def enrich_execution_task(row):
+    item = dict(row)
+    score = item.get("money_proximity_score")
+    if score in [None, ""]:
+        score = 0
+    score = int(score or 0)
+    if score == 0:
+        score = money_proximity_score_for_task(item.get("task_type"), item.get("title"))
+    item["money_proximity_score"] = score
+    item["money_tier"] = money_tier_label(score)
+    item["estimated_minutes"] = int(item.get("estimated_minutes") or (15 if score >= 100 else 30))
+    item["expected_outcome"] = item.get("expected_outcome") or default_expected_outcome(item)
+    return item
+
+
+def default_expected_outcome(task):
+    task_type = clean_value(task.get("task_type"))
+    title = clean_value(task.get("title"))
+    if task_type == "prepare_quote" or "quote" in normalize(title):
+        return "Customer receives a clear commercial next step"
+    if task_type in ["relationship_touch", "outreach"]:
+        return "Relationship has a logged next action"
+    return "Open loop is converted into a completed next action"
+
+
+def get_open_loop_score(conn=None):
+    owns_connection = conn is None
+    conn = conn or get_connection()
+    task_count = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM tasks
+        WHERE status = 'open'
+            AND (
+                assigned_to IS NULL
+                OR COALESCE(NULLIF(title, ''), '') = ''
+                OR COALESCE(NULLIF(due_date, ''), '') = ''
+                OR COALESCE(is_project, 0) = 1
+            )
+        """
+    ).fetchone()["count"]
+    project_count = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM opportunities
+        WHERE COALESCE(status, '') NOT IN ('won', 'lost')
+            AND (
+                owner IS NULL
+                OR COALESCE(NULLIF(next_action, ''), '') = ''
+                OR COALESCE(NULLIF(next_action_date, ''), '') = ''
+            )
+        """
+    ).fetchone()["count"]
+    if owns_connection:
+        conn.close()
+    return int(task_count or 0) + int(project_count or 0)
+
+
+def open_loop_status(score):
+    score = int(score or 0)
+    if score <= 20:
+        return {"label": "Green", "color": "#2ecc71"}
+    if score <= 50:
+        return {"label": "Yellow", "color": "#f6d365"}
+    return {"label": "Red", "color": "#ff5a5f"}
+
+
+def get_execution_dashboard_data():
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT
+            tasks.*,
+            users.full_name AS owner_name,
+            COALESCE(opportunities.opportunity_name, opportunities.title) AS opportunity_title,
+            opportunities.next_action AS opportunity_next_action,
+            organizations.name AS organization_name,
+            contacts.name AS contact_name,
+            quotations.quote_no,
+            quotations.status AS quotation_status,
+            quotations.sell_amount,
+            quotations.currency
+        FROM tasks
+        LEFT JOIN users ON users.id = tasks.assigned_to
+        LEFT JOIN opportunities ON opportunities.id = tasks.opportunity_id
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        LEFT JOIN contacts ON contacts.id = opportunities.contact_id
+        LEFT JOIN quotations ON quotations.id = tasks.quotation_id
+        WHERE tasks.status = 'open'
+        ORDER BY
+            tasks.due_date IS NULL,
+            tasks.due_date,
+            tasks.created_at DESC
+        """
+    ).fetchall()
+    tasks = [enrich_execution_task(row) for row in rows]
+    tasks.sort(
+        key=lambda item: (
+            -int(item.get("money_proximity_score") or 0),
+            item.get("due_date") or "9999-12-31",
+            0 if item.get("priority") == "high" else 1,
+            item.get("created_at") or "",
+        )
+    )
+
+    open_loop_score = get_open_loop_score(conn)
+    parking_rows = conn.execute(
+        """
+        SELECT
+            opportunities.id,
+            COALESCE(opportunities.opportunity_name, opportunities.title, 'Untitled project') AS title,
+            opportunities.stage,
+            opportunities.next_action,
+            opportunities.next_action_date,
+            users.full_name AS owner_name,
+            organizations.name AS organization_name
+        FROM opportunities
+        LEFT JOIN users ON users.id = opportunities.owner
+        LEFT JOIN organizations ON organizations.id = opportunities.organization_id
+        WHERE COALESCE(opportunities.status, '') NOT IN ('won', 'lost')
+            AND (
+                COALESCE(NULLIF(opportunities.next_action, ''), '') = ''
+                OR COALESCE(NULLIF(opportunities.next_action_date, ''), '') = ''
+            )
+        ORDER BY opportunities.updated_at DESC, opportunities.id DESC
+        LIMIT 8
+        """
+    ).fetchall()
+    conn.close()
+
+    money_is_here = [task for task in tasks if int(task.get("money_proximity_score") or 0) >= 100]
+    next_actions = [task for task in tasks if not int(task.get("is_project") or 0)][:10]
+    current_mission = money_is_here[0] if money_is_here else (next_actions[0] if next_actions else None)
+
+    return {
+        "money_is_here": money_is_here,
+        "next_actions": next_actions,
+        "parking_lot": [dict(row) for row in parking_rows],
+        "current_mission": current_mission,
+        "open_loop_score": open_loop_score,
+        "open_loop_status": open_loop_status(open_loop_score),
+    }
 
 
 def get_quote_follow_up_tasks():
@@ -2496,10 +2758,13 @@ def complete_quote_follow_up_task(task_id, channel, next_follow_up_date=None, no
                 due_date,
                 status,
                 priority,
+                money_proximity_score,
+                expected_outcome,
+                estimated_minutes,
                 assigned_to,
                 created_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row_value(task, "contact_id", None),
@@ -2511,6 +2776,9 @@ def complete_quote_follow_up_task(task_id, channel, next_follow_up_date=None, no
                 clean_next_date,
                 "open",
                 "high",
+                100,
+                "Customer gives a decision, question, or next step",
+                15,
                 row_value(task, "assigned_to", None),
                 row_value(task, "created_by", None),
             ),
@@ -4581,8 +4849,10 @@ def get_crm_dashboard_data():
     conn.close()
     queue_rows = get_crm_follow_up_rows()
     today_actions = [row for row in queue_rows if row.get("action_reason")][:capacity]
+    execution = get_execution_dashboard_data()
     return {
         "kpis": dict(kpis),
+        "execution": execution,
         "daily_outreach_capacity": capacity,
         "outreach_queue": {
             "today": min(int(row_value(outreach, "today_count", 0) or 0), capacity),
@@ -5831,10 +6101,13 @@ def update_quotation_status(quotation_id, status, user="admin"):
                     due_date,
                     status,
                     priority,
+                    money_proximity_score,
+                    expected_outcome,
+                    estimated_minutes,
                     assigned_to,
                     created_by
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     quotation["opportunity_id"],
@@ -5844,6 +6117,9 @@ def update_quotation_status(quotation_id, status, user="admin"):
                     follow_up_date,
                     "open",
                     "high",
+                    100,
+                    "Customer gives a decision, question, or next step",
+                    15,
                     row_value(quotation, "owner", None),
                     row_value(quotation, "owner", None),
                 ),

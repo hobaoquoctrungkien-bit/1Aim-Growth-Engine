@@ -60,6 +60,7 @@ from database import (
     save_outreach_campaign_template,
     send_outreach_preview_email,
     get_task_counts_by_type,
+    complete_execution_task,
     import_leads,
     initialize_missing_lead_followups,
     init_db,
@@ -1091,9 +1092,10 @@ def show_quote_follow_up_engine():
 
 
 def show_dashboard():
-    st.title("CRM Sales Cockpit")
+    st.title("1AGE Execution Engine")
     data = get_crm_dashboard_data()
     kpis = data["kpis"]
+    execution = data.get("execution") or {}
     outreach_queue = data["outreach_queue"]
     last_backup = get_last_successful_backup()
 
@@ -1139,6 +1141,95 @@ def show_dashboard():
             """,
             unsafe_allow_html=True,
         )
+
+    def mps_badge(score):
+        score = int(score or 0)
+        color = "#ff5a5f" if score >= 100 else "#f6d365" if score >= 50 else "#2f80ed" if score >= 20 else "#94a3b8"
+        st.markdown(
+            f"""
+            <div style="border:1px solid {color};color:{color};border-radius:6px;padding:6px 8px;text-align:center;font-weight:700;">
+                MPS {score}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    def open_task_target(task):
+        if task.get("opportunity_id"):
+            st.session_state.selected_opportunity_id = task["opportunity_id"]
+            st.session_state.pending_page = "Opportunities"
+            st.rerun()
+        if task.get("contact_id"):
+            st.session_state.selected_lead_id = task.get("lead_id")
+            st.session_state.pending_page = "Leads List"
+            st.rerun()
+
+    def render_execution_rows(rows, key_prefix, limit=10):
+        visible_rows = rows[:limit]
+        if not visible_rows:
+            st.info("No execution actions in this section.")
+            return
+        header_cols = st.columns([1, 3, 2, 2, 1, 1, 1])
+        header_cols[0].caption("Money")
+        header_cols[1].caption("Next Action")
+        header_cols[2].caption("Customer / Project")
+        header_cols[3].caption("Expected Outcome")
+        header_cols[4].caption("Due")
+        header_cols[5].caption("Open")
+        header_cols[6].caption("DONE")
+        for task in visible_rows:
+            cols = st.columns([1, 3, 2, 2, 1, 1, 1])
+            with cols[0]:
+                mps_badge(task.get("money_proximity_score"))
+            cols[1].write(task.get("title") or "Untitled action")
+            cols[2].write(task.get("organization_name") or task.get("opportunity_title") or "-")
+            cols[3].write(task.get("expected_outcome") or "-")
+            cols[4].write(task.get("due_date") or "-")
+            if cols[5].button("Open", key=f"{key_prefix}_open_{task['id']}"):
+                open_task_target(task)
+            if cols[6].button("DONE", key=f"{key_prefix}_done_{task['id']}"):
+                complete_execution_task(task["id"])
+                st.rerun()
+
+    st.subheader("MONEY IS HERE 🔥")
+    open_loop = int(execution.get("open_loop_score") or 0)
+    loop_status = execution.get("open_loop_status") or {}
+    exec_cols = st.columns(4)
+    exec_cols[0].metric("Revenue Actions", len(execution.get("money_is_here") or []))
+    exec_cols[1].metric("Open Loops", open_loop)
+    exec_cols[2].metric("Loop Status", loop_status.get("label") or "-")
+    exec_cols[3].metric("Next Actions", len(execution.get("next_actions") or []))
+
+    mission = execution.get("current_mission")
+    if mission:
+        with st.container(border=True):
+            st.subheader("CURRENT MISSION")
+            mission_cols = st.columns([3, 1, 3, 1])
+            mission_cols[0].markdown(f"**{mission.get('title') or 'Next action'}**")
+            mission_cols[1].metric("Time", f"{int(mission.get('estimated_minutes') or 30)} min")
+            mission_cols[2].write(mission.get("expected_outcome") or "-")
+            if mission_cols[3].button("DONE", type="primary", key=f"mission_done_{mission['id']}"):
+                complete_execution_task(mission["id"])
+                st.rerun()
+    else:
+        st.info("No current mission. Add one clear next action to restart execution flow.")
+
+    render_execution_rows(execution.get("money_is_here") or [], "money_here", limit=8)
+
+    st.subheader("NEXT ACTION ⚡")
+    render_execution_rows(execution.get("next_actions") or [], "next_action", limit=10)
+
+    st.subheader("PARKING LOT 📦")
+    parking_lot = execution.get("parking_lot") or []
+    if not parking_lot:
+        st.info("No ambiguous projects waiting for a next action.")
+    else:
+        for item in parking_lot:
+            cols = st.columns([3, 2, 2, 2])
+            cols[0].write(item.get("title") or "Untitled project")
+            cols[1].write(item.get("organization_name") or "-")
+            cols[2].write(item.get("stage") or "-")
+            cols[3].write(item.get("next_action") or "Needs next action")
 
     kpi_cols = st.columns(6)
     labels = [
